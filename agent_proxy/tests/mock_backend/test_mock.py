@@ -58,6 +58,16 @@ class MockTests(unittest.TestCase):
             self.assertEqual(self.request("GET", f"/sandboxes/{sid}")[0], 200)
             self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
 
+    def test_envd_health_contract_and_200_compatibility(self):
+        for template, expected in (("base", 204), ("mock-health-200", 200)):
+            with self.subTest(template=template):
+                sid = self.create(template)
+                code, body = self.request("GET", f"/envd/{sid}/health", envd=True)
+                self.assertEqual(code, expected)
+                if code == 204:
+                    self.assertEqual(body, b"")
+                self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
+
     def test_lifecycle_preserves_files(self):
         sid = self.create()
         envd = f"/envd/{sid}/files?path=/tmp/a"

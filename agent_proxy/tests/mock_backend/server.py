@@ -198,7 +198,12 @@ class Handler(BaseHTTPRequestHandler):
             if route == "health":
                 if sb["template"] == "mock-health-drop":
                     return self.drop()
-                return self.respond(503 if sb["template"] == "mock-unready" else 200, {})
+                if sb["template"] == "mock-unready":
+                    return self.respond(503, {})
+                if sb["template"] == "mock-health-200":
+                    return self.respond(200, {})
+                # Match real envd: a healthy service returns an empty HTTP 204.
+                return self.respond(204)
             if route == "filesystem.Filesystem/Stat":
                 data = json.loads(body)
                 if data["path"] not in ("/", "/tmp", "/home", "/home/user"):

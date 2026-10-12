@@ -17,7 +17,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ("base", "missing", "mock-rate-limit", "mock-legacy", "mock-unready",
-             "mock-create-drop", "mock-slow-pause", "mock-delete-stuck", "mock-health-drop")
+             "mock-create-drop", "mock-slow-pause", "mock-delete-stuck", "mock-health-drop",
+             "mock-health-200")
 
 
 def check(value, message):
@@ -114,6 +115,13 @@ class Suite:
         return sum(path.endswith("/Start") for _, path in self.stats()["calls"])
 
     def run(self):
+        # The default fixture uses real envd's empty 204 throughout create/status/resume.
+        # Keep coverage for compatible backends that return 200 as well.
+        compatible, _ = self.create("mock-health-200")
+        check(self.call("GetStatus", {"sandbox_id": compatible})["sandbox"]["state"] == "SANDBOX_READY",
+              "HTTP 200 health compatibility")
+        check(self.call("DeleteSandbox", {"sandbox_id": compatible})["cleanup_confirmed"],
+              "cleanup HTTP 200 health fixture")
         sid, created = self.create(meta={"request_id": "create-primary", "phase": "PHASE_CREATE"})
         check(sid.startswith("ap-"), "proxy identity required")
         check(created["sandbox"]["state"] == "SANDBOX_READY", "verified create readiness")

@@ -191,7 +191,8 @@ void E2BAdapter::ready(const Connection& c, OperationContext& ctx, Result& out) 
         auto response = http_.perform(r, ctx);
         health.last_http_status = response.status;
         ++health.http_counts[std::to_string(response.status)];
-        if (response.status == 200) {
+        // envd's /health contract returns 204 with no body. Retain 200 compatibility.
+        if (response.status == 200 || response.status == 204) {
           out.info->envd_ready = true;
           out.basis = Basis::EnvdReady;
           return;

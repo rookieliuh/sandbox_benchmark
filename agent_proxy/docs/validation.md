@@ -48,3 +48,12 @@
 诊断改动的本地检查：Python Mock 15/15 通过（含 HTTP 503、健康连接关闭且仍可清理的用例）；
 修改的 C++ 文件通过 tree-sitter 语法解析，Python 文件通过语法检查，git diff --check 通过。
 本机仍无 Linux C++ 构建环境，不能把这些检查当作编译或 C++ E2E 成功。
+
+## envd 健康响应修复
+
+用户用诊断版复测得到：62 次就绪检查、最后 HTTP 204、无传输错误、清理确认成功。
+参考库 packages/envd/internal/api/store.go 和 spec/envd/envd.yaml 均规定健康接口返回 204。
+适配器原先只接受 200，导致把健康响应误判为仍未就绪；Mock 原先也只返回 200，未覆盖真实契约。
+现修正为接受 204 和 200，Mock 默认返回空正文 204；完整 Mock E2E 将覆盖创建、状态查询、
+恢复时的 204，并保留独立的 200 兼容用例。真实链路后续步骤及新版 Linux CTest 仍待服务器验证。
+修复的本地检查：Python Mock 16/16 通过，修改的 C++/Python 文件语法检查和 diff 检查通过。

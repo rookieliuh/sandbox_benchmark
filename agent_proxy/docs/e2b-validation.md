@@ -141,6 +141,8 @@ PY
 
 CreateSandbox 的 RPC 时间预算包括 POST /sandboxes 和随后访问 envd /health 的时间。
 TTL 是沙箱存活时间，与 RPC 等待时间不同。控制面创建成功不保证数据面可用。
+envd 的 GET /health 正常响应是 HTTP 204（无正文）；适配器接受 204，并兼容 200。
+不要把控制面 /health 的 200 响应要求套用到沙箱内 envd。Mock 默认健康响应也使用 204。
 
 Proxy 的每条操作汇总日志包含 envd_health：attempts、last_http_status、
 last_transport_code 和 http_counts。只记录状态码/次数，不记录响应正文、URL、密钥或访问令牌。
