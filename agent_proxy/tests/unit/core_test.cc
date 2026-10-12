@@ -50,12 +50,19 @@ int main() {
     rejects(Code::BackendProtocolError, [] { base64_decode("%%%%"); });
     std::vector<Json> events;
     ConnectDecoder split([&](const Json& j) { events.push_back(j); });
-    auto wire = connect_frame({{"event", {{"start", {{"pid", 1}}}}}}) + connect_frame({}, 2);
+    auto wire =
+        connect_frame({{"event", {{"start", {{"pid", 1}}}}}}) + connect_frame(Json::object(), 2);
     for (char c : wire)
       split.feed(&c, 1);
     split.finish();
     expect(events.size() == 1, "fragmented stream");
     rejects(Code::BackendProtocolError, [&] { split.feed("x", 1); });
+    for (uint8_t flags : {0, 2}) {
+      ConnectDecoder null_frame([](const Json&) {});
+      auto null_wire = connect_frame(Json(nullptr), flags);
+      rejects(Code::BackendProtocolError,
+              [&] { null_frame.feed(null_wire.data(), null_wire.size()); });
+    }
     ConnectDecoder no_trailer([](const Json&) {});
     rejects(Code::BackendProtocolError, [&] { no_trailer.finish(); });
     ConnectDecoder bad([](const Json&) {});
