@@ -5,6 +5,7 @@
 #include "adapters/e2b/connect_codec.h"
 #include "core/executor.h"
 #include "tools/arguments.h"
+#include "transport/http.h"
 
 using namespace ap;
 using Json = nlohmann::json;
@@ -110,6 +111,32 @@ int main() {
              "queued request expires while worker is busy");
     }
     OperationContext ctx;
+    HttpRequest request;
+    request.method = "GET";
+    request.source = Source::Envd;
+    request.resource = "file";
+    request.url = "http://example.invalid/files?signature=private-query";
+    request.headers = {"X-Access-Token: private-token"};
+    HttpResponse response;
+    response.status = 500;
+    response.body = "private-backend-body";
+    try {
+      HttpClient::require_success(response, request, ctx);
+      expect(false, "HTTP 500 must be rejected");
+    } catch (const Error& error) {
+      const std::string message = error.what();
+      expect(error.code == Code::BackendError && error.http_status == 500 &&
+                 error.backend_code == "HTTP_500",
+             "preserve HTTP failure code");
+      expect(message.find("source=envd") != std::string::npos &&
+                 message.find("phase=operation") != std::string::npos &&
+                 message.find("method=GET") != std::string::npos &&
+                 message.find("resource=file") != std::string::npos,
+             "identify rejected file request");
+      expect(message.find("private-") == std::string::npos &&
+                 message.find("example.invalid") == std::string::npos,
+             "do not expose headers, URL or backend response body");
+    }
     ctx.deadline = Clock::now() - std::chrono::milliseconds(1);
     rejects(Code::DeadlineExceeded, [&] { ctx.check(); });
     std::cout << count << " core checks passed\n";

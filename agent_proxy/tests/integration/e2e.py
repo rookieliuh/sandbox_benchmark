@@ -162,6 +162,12 @@ class Suite:
         self.step(sid, "bash", {"command": "printf hello"}, "ERROR_INVALID_ARGUMENT", step_id=0)
         self.step(sid, "bash", {"command": "printf hello"}, "ERROR_INVALID_ARGUMENT", timeout_ms=0)
         self.step(sid, "python", {}, "ERROR_UNSUPPORTED_TOOL")
+        rejected = self.step(sid, "read", {"path": "/tmp/mock-backend-error"}, "ERROR_BACKEND_ERROR")
+        check(rejected["error"]["backend_code"] == "HTTP_500" and
+              all(x in rejected["error"]["message"] for x in
+                  ("source=envd", "phase=operation", "method=GET", "resource=file", "http_status=500")),
+              "surface file HTTP failure without losing stage")
+        check("private-backend-diagnostic" not in json.dumps(rejected), "never expose raw backend error body")
         self.call("RunStep", {"sandbox_id": sid, "tool": "bash", "arguments_json": "{"}, "ERROR_INVALID_ARGUMENT")
         content = '你好 agent\nquotes: " \\\n'
         write = self.step(sid, "write", {"path": "/tmp/a space.txt", "content": content},
@@ -353,6 +359,8 @@ def main():
         (artifacts / "smoke.log").write_text(smoke.stdout + smoke.stderr, encoding="utf-8")
         check(smoke.returncode == 0, "smoke driver failed against Mock: " + smoke.stdout + smoke.stderr)
         check("Cleanup confirmed: true" in smoke.stdout, "smoke driver prints cleanup result")
+        check(all(f"RunStep[{tool}]: ERROR_OK" in smoke.stdout for tool in ("bash", "write", "read", "edit")),
+              "smoke driver identifies each tool")
         report["smoke_driver_passed"] = True
         report["passed"] = True
     except Exception:

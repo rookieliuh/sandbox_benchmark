@@ -68,6 +68,13 @@ class MockTests(unittest.TestCase):
                     self.assertEqual(body, b"")
                 self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
 
+    def test_file_read_backend_failure_fixture(self):
+        sid = self.create()
+        code, body = self.request("GET", f"/envd/{sid}/files?path=/tmp/mock-backend-error", envd=True)
+        self.assertEqual(code, 500)
+        self.assertEqual(json.loads(body)["message"], "private-backend-diagnostic")
+        self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
+
     def test_lifecycle_preserves_files(self):
         sid = self.create()
         envd = f"/envd/{sid}/files?path=/tmp/a"

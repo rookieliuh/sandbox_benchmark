@@ -212,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
             if route == "files":
                 file_path = query["path"][0]
                 if self.command == "GET":
+                    if file_path == "/tmp/mock-backend-error":
+                        return self.respond(500, {"message": "private-backend-diagnostic"})
                     if file_path == "/tmp/mock-binary":
                         return self.respond(200, b"\xff\xfe", "application/octet-stream")
                     if file_path == "/tmp/mock-oversize":

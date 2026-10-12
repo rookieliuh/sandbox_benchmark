@@ -154,3 +154,9 @@ AP_N 是 Proxy 内部错误编号。就绪超时也会在 RPC error.message 中�
 这只改变 GET /health 的重试频率，不重试创建请求，不增加原有超时，也不修改共享后端配置。
 HTTP 404 可能涉及沙箱路由/注册，502/503/504 可能涉及上游可用性；不能仅凭一个状态码确定根因。
 删除成功后的健康检查会失去原有诊断价值，不要用已删除沙箱的 404 反推创建时的状态。
+
+所有非成功 HTTP 响应在 error.backend_code 中记录 HTTP_N，在 error.message 中保留
+source（control/envd）、phase、method、resource 和 http_status；不输出原始响应正文或请求 URL。
+例如 envd / operation / GET / file 表示文件读取被拒绝，而 envd / operation / POST / file
+表示上传失败。冒烟脚本按 RunStep[bash/write/read/edit] 打印工具名，先独立验证写入后的读取，
+再验证编辑和编辑后的读取。根据具体状态排查，不从 ERROR_BACKEND_ERROR 推断某一种根因。

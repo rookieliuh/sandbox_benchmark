@@ -71,14 +71,15 @@ def main():
             raise RuntimeError(f'{method}: client transport/local failure, exit={result.returncode}')
         response = json.loads(result.stdout)
         code = response.get('error', {}).get('code')
-        print(f'{method}: {code}', flush=True)
+        label = f'RunStep[{body["tool"]}]' if method == 'RunStep' else method
+        print(f'{label}: {code}', flush=True)
         if code != 'ERROR_OK':
             detail = response.get('error', {})
             # These are sanitized Proxy errors, never the raw backend response or config.
             print('Proxy error:', json.dumps({k: detail.get(k, '') for k in
                                              ('message', 'backend_code')}, ensure_ascii=False), flush=True)
         if require_success and (not response.get('success') or code != 'ERROR_OK'):
-            raise RuntimeError(f'{method} failed: {code}')
+            raise RuntimeError(f'{label} failed: {code}')
         return response
 
     def step(tool, arguments):
@@ -117,6 +118,8 @@ def main():
                 raise RuntimeError('Command output mismatch')
             path = '/tmp/' + run + '.txt'
             step('write', {'path': path, 'content': 'agent proxy smoke'})
+            if step('read', {'path': path})['content'] != 'agent proxy smoke':
+                raise RuntimeError('Initial file write/read mismatch')
             step('edit', {'path': path, 'oldString': 'proxy', 'newString': 'benchmark'})
             if step('read', {'path': path})['content'] != 'agent benchmark smoke':
                 raise RuntimeError('File roundtrip mismatch')

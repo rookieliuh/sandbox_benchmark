@@ -57,3 +57,12 @@
 现修正为接受 204 和 200，Mock 默认返回空正文 204；完整 Mock E2E 将覆盖创建、状态查询、
 恢复时的 204，并保留独立的 200 兼容用例。真实链路后续步骤及新版 Linux CTest 仍待服务器验证。
 修复的本地检查：Python Mock 16/16 通过，修改的 C++/Python 文件语法检查和 diff 检查通过。
+
+## 文件操作联调诊断
+
+用户复测已通过 CreateSandbox、GetStatus、bash 和 write，在 edit 阶段收到 ERROR_BACKEND_ERROR，
+随后清理确认成功；尚未验证 pause/resume。旧错误消息未输出 HTTP 状态，无法确定是 edit 内部读取
+还是后续上传失败。新增 HTTP 状态/调用阶段诊断，保留统一错误码，且不输出后端原始正文或敏感 URL。
+冒烟脚本增加 write 后独立 read，打印各工具名称；新增 HTTP 500 文件读取及错误信息脱敏回归用例。
+该改动用于诊断，尚未确认或修复本次真实文件操作失败的根因。新增 C++ 用例待服务器验证。
+本地检查：Python Mock 17/17 通过，修改的 C++/Python 文件语法检查和 diff 检查通过。
