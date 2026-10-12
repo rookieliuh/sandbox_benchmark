@@ -1,0 +1,9 @@
+.git
+.deps
+build*
+__pycache__
+**/__pycache__
+test-results
+validation-logs
+*.log
+.env

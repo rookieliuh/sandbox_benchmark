@@ -1,0 +1,11 @@
+{
+  "backends": {
+    "mock": {
+      "type": "e2b",
+      "profile": "kasandbox",
+      "api_url": "http://127.0.0.1:18080",
+      "api_key_env": "MOCK_E2B_API_KEY",
+      "envd_url_pattern": "http://127.0.0.1:18080/envd/{sandbox_id}"
+    }
+  }
+}

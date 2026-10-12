@@ -1,0 +1,156 @@
+syntax = "proto2";
+package agentproxy.v1;
+option cc_generic_services = true;
+
+enum ErrorCode {
+  OK = 0;
+  INVALID_ARGUMENT = 1001;
+  UNSUPPORTED = 1002;
+  PAYLOAD_TOO_LARGE = 1003;
+  NOT_FOUND = 1101;
+  INVALID_STATE = 1102;
+  EDIT_CONFLICT = 1103;
+  SANDBOX_BUSY = 1104;
+  UNAUTHENTICATED = 1201;
+  PERMISSION_DENIED = 1202;
+  RATE_LIMITED = 1301;
+  RESOURCE_EXHAUSTED = 1302;
+  DEADLINE_EXCEEDED = 1401;
+  CANCELLED = 1402;
+  BACKEND_UNAVAILABLE = 1501;
+  BACKEND_ERROR = 1502;
+  BACKEND_PROTOCOL_ERROR = 1503;
+  INTERNAL_ERROR = 1901;
+}
+enum Outcome { NOT_STARTED = 0; COMPLETED = 1; UNKNOWN = 2; }
+enum ErrorSource { PROXY = 0; CONTROL_API = 1; ENVD = 2; }
+enum RetryAdvice { DO_NOT_RETRY = 0; SAFE_TO_RETRY = 1; RECONCILE_FIRST = 2; }
+enum SandboxState { STATE_UNKNOWN = 0; RUNNING = 1; PAUSED = 2; DELETED = 3; }
+enum CompletionBasis { BASIS_UNSPECIFIED = 0; BACKEND_ACK = 1; ENVD_READY = 2; STATE_OBSERVED = 3; }
+enum Termination { TERMINATION_UNKNOWN = 0; EXITED = 1; TIMED_OUT = 2; TERMINATION_CANCELLED = 3; SIGNALLED = 4; }
+
+message RequestContext {
+  optional string request_id = 1;
+  optional uint32 timeout_ms = 2;
+}
+message SandboxRef { optional string backend = 1; optional string sandbox_id = 2; }
+message Status {
+  optional ErrorCode code = 1 [default = OK];
+  optional string message = 2;
+  optional ErrorSource source = 3 [default = PROXY];
+  optional string resource_type = 4;
+  optional uint32 http_status = 5;
+  optional string backend_code = 6;
+  optional RetryAdvice retry_advice = 7 [default = DO_NOT_RETRY];
+  optional uint32 retry_after_ms = 8;
+}
+message Timing {
+  optional uint64 proxy_total_us = 1;
+  optional uint64 queue_us = 2;
+  optional uint64 preflight_us = 3;
+  optional uint64 operation_us = 4;
+  optional uint64 readiness_us = 5;
+  optional uint64 cleanup_us = 6;
+  optional uint64 backend_total_us = 7;
+}
+message ResponseContext {
+  optional string request_id = 1;
+  optional Status status = 2;
+  optional Outcome outcome = 3 [default = NOT_STARTED];
+  optional Timing timing = 4;
+  optional uint32 backend_request_count = 5;
+}
+message SandboxInfo {
+  optional SandboxRef ref = 1;
+  optional SandboxState state = 2 [default = STATE_UNKNOWN];
+  optional string template_id = 3;
+  map<string, string> metadata = 4;
+  optional string expires_at = 5; // RFC3339 from backend; absent if unknown.
+  optional string observed_at = 6; // UTC RFC3339.
+  optional bool envd_ready = 7;
+}
+message BashResult {
+  optional bytes stdout = 1;
+  optional bytes stderr = 2;
+  optional sint32 exit_code = 3; // Absent until an exit event is received.
+  optional Termination termination = 4;
+  optional bool stdout_truncated = 5;
+  optional bool stderr_truncated = 6;
+  optional bool termination_confirmed = 7;
+  optional uint32 effective_execution_timeout_ms = 8;
+  optional uint32 pid = 9;
+}
+message ReadResult { optional string content = 1; optional uint64 size_bytes = 2; }
+message WriteResult { optional uint64 bytes_written = 1; }
+message EditResult { optional uint32 replacement_count = 1; optional uint64 bytes_written = 2; }
+
+message CreateSandboxRequest {
+  optional RequestContext context = 1;
+  optional string backend = 2;
+  optional string template_id = 3;
+  optional uint32 ttl_seconds = 4 [default = 300];
+  map<string, string> env_vars = 5;
+  map<string, string> metadata = 6;
+  optional bool wait_ready = 7 [default = true];
+}
+message CreateSandboxResponse {
+  optional ResponseContext context = 1;
+  optional SandboxInfo sandbox = 2;
+  optional CompletionBasis completion_basis = 3;
+}
+message RunStepRequest {
+  optional RequestContext context = 1;
+  optional SandboxRef ref = 2;
+  optional string tool = 3;
+  optional string arguments_json = 4;
+  optional uint32 execution_timeout_ms = 5 [default = 60000];
+}
+message RunStepResponse {
+  optional ResponseContext context = 1;
+  oneof result {
+    BashResult bash = 2;
+    ReadResult read = 3;
+    WriteResult write = 4;
+    EditResult edit = 5;
+  }
+}
+message PauseSandboxRequest { optional RequestContext context = 1; optional SandboxRef ref = 2; }
+message PauseSandboxResponse {
+  optional ResponseContext context = 1;
+  optional SandboxInfo sandbox = 2;
+  optional bool already_paused = 3;
+  optional CompletionBasis completion_basis = 4;
+}
+message ResumeSandboxRequest {
+  optional RequestContext context = 1;
+  optional SandboxRef ref = 2;
+  optional uint32 ttl_seconds = 3 [default = 300];
+  optional bool wait_ready = 4 [default = true];
+}
+message ResumeSandboxResponse {
+  optional ResponseContext context = 1;
+  optional SandboxInfo sandbox = 2;
+  optional bool already_running = 3;
+  optional CompletionBasis completion_basis = 4;
+}
+message DeleteSandboxRequest {
+  optional RequestContext context = 1;
+  optional SandboxRef ref = 2;
+  optional bool ignore_missing = 3 [default = true];
+}
+message DeleteSandboxResponse {
+  optional ResponseContext context = 1;
+  optional SandboxRef ref = 2;
+  optional bool already_absent = 3;
+  optional CompletionBasis completion_basis = 4;
+}
+message GetStatusRequest { optional RequestContext context = 1; optional SandboxRef ref = 2; }
+message GetStatusResponse { optional ResponseContext context = 1; optional SandboxInfo sandbox = 2; }
+service AgentProxyService {
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc RunStep(RunStepRequest) returns (RunStepResponse);
+  rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
+  rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
+  rpc DeleteSandbox(DeleteSandboxRequest) returns (DeleteSandboxResponse);
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}

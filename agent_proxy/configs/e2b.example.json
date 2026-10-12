@@ -1,0 +1,20 @@
+{
+  "backends": {
+    "kasandbox-dev": {
+      "type": "e2b",
+      "profile": "kasandbox",
+      "api_url": "http://api.sandbox.example:3000",
+      "api_key_env": "E2B_API_KEY",
+      "sandbox_domain": "sandbox.example",
+      "envd_scheme": "http"
+    },
+    "e2b-cloud": {
+      "type": "e2b",
+      "profile": "e2b_cloud",
+      "api_url": "https://api.e2b.dev",
+      "api_key_env": "E2B_CLOUD_API_KEY",
+      "sandbox_domain": "e2b.app",
+      "envd_scheme": "https"
+    }
+  }
+}

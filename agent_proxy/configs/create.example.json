@@ -1,0 +1,8 @@
+{
+  "context": {"request_id": "example-create", "timeout_ms": 60000},
+  "backend": "mock",
+  "template_id": "base",
+  "ttl_seconds": 300,
+  "wait_ready": true,
+  "metadata": {"benchmark_run": "example"}
+}

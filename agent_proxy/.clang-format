@@ -1,0 +1,6 @@
+BasedOnStyle: Google
+Standard: c++17
+ColumnLimit: 100
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false

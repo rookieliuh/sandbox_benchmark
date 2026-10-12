@@ -1,0 +1,8 @@
+build*/
+.deps/
+__pycache__/
+*.pyc
+*.log
+test-results/
+.env
+validation-logs/
