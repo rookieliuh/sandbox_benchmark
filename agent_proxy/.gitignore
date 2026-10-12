@@ -6,3 +6,4 @@ __pycache__/
 test-results/
 .env
 validation-logs/
+configs/*.local.json

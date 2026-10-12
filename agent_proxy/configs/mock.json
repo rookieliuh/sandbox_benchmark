@@ -5,7 +5,14 @@
       "profile": "kasandbox",
       "api_url": "http://127.0.0.1:18080",
       "api_key_env": "MOCK_E2B_API_KEY",
-      "envd_url_pattern": "http://127.0.0.1:18080/envd/{sandbox_id}"
+      "envd_url_pattern": "http://127.0.0.1:18080/envd/{sandbox_id}",
+      "templates": {
+        "base": {
+          "backend_template_id": "base",
+          "cpu_count": 1,
+          "memory_mib": 512
+        }
+      }
     }
   }
 }

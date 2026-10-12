@@ -1,7 +1,11 @@
 import base64
 import json
+import os
+from pathlib import Path
+import subprocess
 import struct
 import threading
+import sys
 import unittest
 import urllib.error
 import urllib.request
@@ -123,6 +127,53 @@ class MockTests(unittest.TestCase):
         code, body = self.request("POST", path, {"path": "/absent"}, True)
         self.assertEqual(code, 404)
         self.assertEqual(json.loads(body)["code"], "not_found")
+
+    def test_pause_ack_precedes_paused_state(self):
+        code, body = self.request("POST", "/sandboxes", {"templateID": "mock-slow-pause", "timeout": 300,
+                                                       "autoPause": False, "autoResume": {"policy": "off"}})
+        self.assertEqual(code, 201)
+        sid = json.loads(body)["sandboxID"]
+        self.assertEqual(self.request("POST", f"/sandboxes/{sid}/pause", {})[0], 204)
+        self.assertEqual(json.loads(self.request("GET", f"/sandboxes/{sid}")[1])["state"], "pausing")
+        self.assertEqual(json.loads(self.request("GET", f"/sandboxes/{sid}")[1])["state"], "paused")
+
+    def test_delete_ack_can_leave_resource(self):
+        code, body = self.request("POST", "/sandboxes", {"templateID": "mock-delete-stuck", "timeout": 300,
+                                                       "autoPause": False, "autoResume": {"policy": "off"}})
+        self.assertEqual(code, 201)
+        sid = json.loads(body)["sandboxID"]
+        self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
+        self.assertEqual(self.request("GET", f"/sandboxes/{sid}")[0], 200)
+
+    def test_read_only_list_does_not_mutate_sandboxes(self):
+        self.create()
+        before = set(self.server.backend.sandboxes)
+        code, body = self.request("GET", "/sandboxes?limit=1")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(json.loads(body)), 1)
+        self.assertEqual(set(self.server.backend.sandboxes), before)
+
+    def run_probe(self, key):
+        script = Path(__file__).resolve().parents[2] / "scripts/check_e2b.py"
+        env = dict(os.environ, E2B_API_KEY=key, NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
+        return subprocess.run([sys.executable, str(script), "--api-url", self.url],
+                              capture_output=True, text=True, timeout=15, env=env)
+
+    def test_probe_script_is_read_only(self):
+        before = set(self.server.backend.sandboxes)
+        calls = len(self.server.backend.calls)
+        result = self.run_probe("mock-key")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS:", result.stdout)
+        self.assertNotIn("mock-key", result.stdout)
+        self.assertEqual(set(self.server.backend.sandboxes), before)
+        self.assertTrue(all(method == "GET" for method, _ in self.server.backend.calls[calls:]))
+
+    def test_probe_script_rejects_invalid_key(self):
+        result = self.run_probe("wrong-secret-key")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("HTTP 401", result.stdout)
+        self.assertNotIn("wrong-secret-key", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

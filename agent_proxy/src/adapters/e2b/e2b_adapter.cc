@@ -91,6 +91,8 @@ Info E2BAdapter::info(const Json& j, const Ref& ref, State fallback) const {
     out.state = State::Running;
   else if (state == "paused")
     out.state = State::Paused;
+  else if (state == "pausing" || state == "resuming" || state == "creating" || state == "deleting")
+    out.state = State::Unknown;
   else if (state.empty())
     out.state = fallback;
   else
@@ -226,9 +228,10 @@ void E2BAdapter::create(const CreateSpec& spec, OperationContext& ctx, Result& o
     ready(connection(j, out.info->ref), ctx, out);
 }
 void E2BAdapter::status(const Ref& ref, OperationContext& ctx, Result& out) {
-  out.info = info(details(ref, ctx, Phase::Operation), ref);
-  if (out.info->state == State::Unknown)
-    throw Error(Code::BackendProtocolError, "status response omitted state", Source::Control);
+  auto j = details(ref, ctx, Phase::Operation);
+  out.info = info(j, ref);
+  if (out.info->state == State::Running)
+    ready(connection(j, ref), ctx, out);
   ctx.outcome = Outcome::Completed;
   out.basis = Basis::StateObserved;
 }
@@ -250,13 +253,18 @@ void E2BAdapter::pause(const Ref& ref, OperationContext& ctx, Result& out) {
   HttpClient::require_success(response, r, ctx);
   if (response.status != 204)
     throw Error(Code::BackendProtocolError, "unexpected pause success status", Source::Control);
-  Info i;
-  i.ref = ref;
-  i.state = State::Paused;
-  i.observed_at = utc_now();
-  out.info = i;
+  // A POST acknowledgement alone is not a verified PAUSED state.
+  while (true) {
+    ctx.check();
+    auto current = info(details(ref, ctx, Phase::Readiness), ref);
+    out.info = current;
+    if (current.state == State::Paused)
+      break;
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(std::min<int64_t>(50, ctx.remaining_ms())));
+  }
   ctx.outcome = Outcome::Completed;
-  out.basis = Basis::BackendAck;
+  out.basis = Basis::StateObserved;
 }
 void E2BAdapter::resume(const ResumeSpec& spec, OperationContext& ctx, Result& out) {
   auto r =
@@ -284,8 +292,19 @@ void E2BAdapter::remove(const Ref& ref, bool ignore_missing, OperationContext& c
     if (response.status != 204)
       throw Error(Code::BackendProtocolError, "unexpected delete success status", Source::Control);
   }
+  // Confirm control-plane absence. Never infer physical cleanup from an HTTP 204 alone.
+  while (!out.already) {
+    ctx.check();
+    auto check = control("GET", "/sandboxes/" + url_encode(ref.id), Phase::Readiness);
+    auto observed = http_.perform(check, ctx);
+    if (observed.status == 404)
+      break;
+    HttpClient::require_success(observed, check, ctx);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(std::min<int64_t>(50, ctx.remaining_ms())));
+  }
   ctx.outcome = Outcome::Completed;
-  out.basis = out.already ? Basis::StateObserved : Basis::BackendAck;
+  out.basis = Basis::StateObserved;
 }
 std::string E2BAdapter::read_file(const Connection& c, const std::string& path,
                                   OperationContext& ctx) const {
@@ -366,6 +385,7 @@ void E2BAdapter::bash(const Connection& c, const Bash& command, OperationContext
       if (pid == 0 || pid > UINT32_MAX)
         throw Error(Code::BackendProtocolError, "invalid process PID", Source::Envd);
       result.pid = static_cast<uint32_t>(pid);
+      ctx.on_dispatch(true);
       started = true;
     } else if (event.contains("keepalive")) {
       if (ended)

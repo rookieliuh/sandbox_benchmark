@@ -17,7 +17,7 @@ std::map<std::string, BackendConfig> load_backends(const std::string& path) {
   std::map<std::string, BackendConfig> configs;
   const std::set<std::string> fields = {
       "type",           "profile",     "api_url", "api_key_env", "envd_url_pattern",
-      "sandbox_domain", "envd_scheme", "user"};
+      "sandbox_domain", "envd_scheme", "user",    "templates"};
   for (auto it = root["backends"].begin(); it != root["backends"].end(); ++it) {
     const auto& j = it.value();
     if (!std::regex_match(it.key(), std::regex("[A-Za-z0-9_-]{1,64}")) || !j.is_object())
@@ -39,6 +39,24 @@ std::map<std::string, BackendConfig> load_backends(const std::string& path) {
     c.sandbox_domain = j.value("sandbox_domain", "");
     c.envd_scheme = j.value("envd_scheme", "https");
     c.user = j.value("user", "");
+    if (j.contains("templates")) {
+      if (!j["templates"].is_object())
+        throw std::runtime_error("templates must be an object");
+      for (auto t = j["templates"].begin(); t != j["templates"].end(); ++t) {
+        const auto& v = t.value();
+        if (t.key().empty() || !v.is_object() || v.size() != 3 ||
+            !v.contains("backend_template_id") || !v["backend_template_id"].is_string() ||
+            !v.contains("cpu_count") || !v["cpu_count"].is_number_unsigned() ||
+            !v.contains("memory_mib") || !v["memory_mib"].is_number_unsigned())
+          throw std::runtime_error("template requires backend_template_id, cpu_count, memory_mib");
+        auto cpu = v["cpu_count"].get<uint64_t>();
+        auto mem = v["memory_mib"].get<uint64_t>();
+        auto id = v["backend_template_id"].get<std::string>();
+        if (cpu == 0 || cpu > UINT32_MAX || mem == 0 || id.empty())
+          throw std::runtime_error("invalid template specification");
+        c.templates.emplace(t.key(), TemplateConfig{id, static_cast<uint32_t>(cpu), mem});
+      }
+    }
     if (c.envd_scheme != "https" && c.envd_scheme != "http")
       throw std::runtime_error("invalid envd scheme");
     for (const auto* url : {&c.api_url, &c.envd_url_pattern}) {

@@ -12,10 +12,13 @@ DEFINE_string(backends, "configs/mock.json", "Backend configuration JSON");
 DEFINE_int32(control_threads, 4, "Control API worker threads");
 DEFINE_int32(step_threads, 16, "RunStep worker threads");
 DEFINE_int32(queue_size, 128, "Maximum waiting requests per worker pool");
+DEFINE_int32(max_records, 10000, "Maximum operation records retained until restart");
+DEFINE_int32(record_memory_mib, 256, "Operation record budget including in-flight reservations");
 DEFINE_int32(admin_port, 0, "Optional bRPC internal services port; 0 disables builtins");
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  if (FLAGS_control_threads <= 0 || FLAGS_step_threads <= 0 || FLAGS_queue_size <= 0) {
+  if (FLAGS_control_threads <= 0 || FLAGS_step_threads <= 0 || FLAGS_queue_size <= 0 ||
+      FLAGS_max_records <= 0 || FLAGS_record_memory_mib < 32) {
     std::cerr << "worker and queue limits must be positive\n";
     return 1;
   }
@@ -26,7 +29,9 @@ int main(int argc, char** argv) {
   int result = 0;
   try {
     auto configs = ap::load_backends(FLAGS_backends);
-    ap::Service service(configs, FLAGS_control_threads, FLAGS_step_threads, FLAGS_queue_size);
+    ap::Service service(configs, FLAGS_control_threads, FLAGS_step_threads, FLAGS_queue_size,
+                        FLAGS_max_records,
+                        static_cast<size_t>(FLAGS_record_memory_mib) * 1024 * 1024);
     brpc::Server server;
     if (server.AddService(&service, brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
       throw std::runtime_error("cannot register service");

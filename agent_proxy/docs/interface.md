@@ -1,92 +1,108 @@
-# Agent Proxy v1 接口约定
+# benchmark.agent.v1 接口语义
 
-IDL 为 `proto/agent_proxy.proto`，包名 `agentproxy.v1`，服务名 `AgentProxyService`。所有消息使用 proto2 optional 字段保证默认值和存在性；业务必填字段由服务端校验，以返回统一错误。
+IDL：`proto/agent_proxy.proto`，与协作方提供的文件一致。服务使用原生 `baidu_std` bRPC、proto3、`cc_generic_services=true`。本文补充 IDL 没有表达的 JSON 结构、预算和运行边界，不添加协议字段。
 
-## 公共消息
+## 请求与响应
 
-请求 `context.request_id` 必填（1～256 字节、无 NUL/换行），只作追踪，不作去重。`context.timeout_ms` 省略使用方法默认值，0 非法。Ref 的 `backend` 是服务端配置名，`sandbox_id` 仅接受字母、数字、下划线、连字符。
+所有请求的 `meta.request_id` 必填、1～256 字节、无 NUL/换行；meta 总长不超过 8 KiB，phase 必须是声明过的枚举。其他 benchmark 标签可省略，原样保存在操作记录中。`meta.trace_id` 回显到响应。`ResponseMeta.request_id` 始终属于本次 RPC，不会被原操作 ID 替换。
 
-所有响应含 `context.status`、`context.outcome`、`context.timing` 和实际后端请求数。失败时可能保留部分业务结果，例如创建成功后健康检查超时仍保留 sandbox.ref，命令超时仍保留部分输出。
+除 GetStatus 外，timeout_ms 必须显式为正；Create 还要求正 CPU、memory_mib、TTL。RunStep.step_id 必须为正；从 1 开始的编号及 task_instance_id 内的顺序由 Client 维护，Proxy 不按 step_id 去重。
 
-outcome：
+响应必须同时满足 success=true、error.code=ERROR_OK 才表示成功。ERROR_OK 数值为 1，0 表示未指定，不可当成功。RunStep.error_message 始终与 error.message 相同。
 
-- NOT_STARTED：目标操作尚未提交，如参数校验或前置查询失败。
-- COMPLETED：已知结果（包括拒绝、命令非零退出、创建成功但后续健康检查失败）。
-- UNKNOWN：目标请求可能执行，但未获得可靠结果；必须先协调状态或读回数据。
+## 六个 RPC
 
-`retry_advice` 仅是建议，Proxy 不自动重试；UNKNOWN 返回 RECONCILE_FIRST。RPC 传输失败时可能没有响应，需要客户端按不确定结果处理。客户端超时不保证服务端感知取消，显式 Proxy 预算仍会生效。
-
-SandboxInfo.state 表示控制面报告的 RUNNING/PAUSED。envd_ready 只有执行过健康检查才存在。GetStatus 不返回缓存状态，404 为 NOT_FOUND，不推断已删除。DELETED 枚举为后续扩展保留，Delete 当前只返回引用及确认依据。
-
-## RPC
-
-| 方法 | 请求业务字段 | 响应业务字段 |
-|---|---|---|
-| CreateSandbox | backend、template_id 必填；ttl_seconds=300、env_vars、metadata、wait_ready=true | sandbox、completion_basis |
-| RunStep | ref、tool、arguments_json；bash 可选 execution_timeout_ms=60000 | bash/read/write/edit oneof |
-| PauseSandbox | ref | sandbox、already_paused、completion_basis |
-| ResumeSandbox | ref、ttl_seconds=300、wait_ready=true | sandbox、already_running、completion_basis |
-| DeleteSandbox | ref、ignore_missing=true | ref、already_absent、completion_basis |
-| GetStatus | ref | sandbox |
-
-Create 显式设置 secure=true、autoPause=false、autoResume.policy=off。TTL 必须在 1..INT32_MAX 秒，最终还受后端限制。Resume 使用 `/connect`，既恢复暂停沙箱，也可延长运行中沙箱的 TTL；不能缩短已有 TTL。Create/Resume 默认经 `/health` 就绪检查返回 ENVD_READY；关闭 wait_ready 返回 BACKEND_ACK。
-
-Pause 要求后端全内存暂停，不做文件系统快照降级。HTTP 409 时查询沙箱，只有确认 PAUSED 才转换为成功。参考库可能将 pausing 报告为 paused，因此成功不意味着 Proxy 额外验证了持久化快照。Delete 成功为后端确认，不保证宿主资源即时回收；仅在 ignore_missing=true 时将 404 视为成功。
-
-## 工具
-
-arguments_json 必须是 object，未知字段报错。字段名区分大小写；文件路径和显式 cwd 必须是沙箱内绝对路径。
-
-| 工具 | 必填参数 | 可选参数 | 输出 |
-|---|---|---|---|
-| bash | command | cwd、env | stdout/stderr bytes、可选 exit_code、termination、PID、截断和退出确认标记、实际执行预算 |
-| read | path | 无 | UTF-8 content、size_bytes |
-| write | path、content | 无 | bytes_written |
-| edit | path、oldString、newString | 无 | replacement_count、bytes_written |
-
-bash 运行 `/bin/bash -l -c`，stdin=false。env 键采用 shell 环境变量标识符格式；command 和 env 值禁止 NUL。HTTP/Connect 的非零退出可能附带 `error: "exit status N"`，这是命令结果，返回 status=OK。end.exited=false 的完整终止事件标记 SIGNALLED。无有效退出事件则不填 exit_code。
-
-write 覆盖文件，先通过 Filesystem.Stat 检查父目录，因为 envd 上传接口会自动创建父目录。该检查与上传之间仍可能被外部修改，首版不保证全局原子性。edit 读回全文后做唯一字面匹配（含重叠匹配），再写回；零匹配、多匹配、空 oldString 均不写。所有文件内容是 UTF-8，文本可含 NUL；二进制 read 返回 UNSUPPORTED。
-
-同一 Proxy 实例的 RunStep/Pause/Resume/Delete 互斥；冲突返回 SANDBOX_BUSY。外部 SDK、沙箱内部进程和其他 Proxy 实例不受该锁保护。每次 RunStep 都前置 GET 详情，确认运行并取得数据面 token/版本；该检查不消除之后的外部竞态，也不触发自动恢复/续期。
-
-单文件 8 MiB、单 RPC 16 MiB、command 1 MiB、stdout/stderr 各保留前 1 MiB。输出超出限制仍消费后续事件，直到退出；文件超限返回错误，不当作完整 read 成功。
-
-## 超时与清理
-
-| RPC | 默认预算 | 上限 |
-|---|---:|---:|
-| Create/Pause/Resume | 60s | 300s |
-| RunStep bash | 65s | 900s |
-| RunStep 文件 | 30s | 120s |
-| Delete | 30s | 120s |
-| GetStatus | 10s | 30s |
-
-使用单调时钟计算统一 deadline。排队、前置检查、实际调用、健康检查均共享预算。建连最长 3 秒，仍受剩余预算限制。bash 实际预算为 min(execution_timeout_ms, 剩余预算-2秒)，通过 Connect-Timeout-Ms 传递，并由 libcurl 本地计时约束。
-
-所有异常中断的命令流，若已有 PID 且未见终止事件，会尝试 SendSignal(SIGKILL)，单次清理最多 2 秒且不越过总 deadline。信号被接受也不将 termination_confirmed 设为 true；只有收到终止事件才确认退出。主机不可达、未拿到 PID、进程逃逸等情况下无法保证清理，Benchmark 应删除沙箱收尾。没有接入后台进程或 PTY 管理。
-
-测试客户端默认传输超时为 Proxy 预算+2秒，max_retry=0；服务端不读取客户端私有超时字段来替代明确的操作预算。
-
-## 错误码
-
-| 编号 | 名称 |
+| 方法 | 语义 |
 |---|---|
-| 0 | OK |
-| 1001/1002/1003 | INVALID_ARGUMENT / UNSUPPORTED / PAYLOAD_TOO_LARGE |
-| 1101/1102/1103/1104 | NOT_FOUND / INVALID_STATE / EDIT_CONFLICT / SANDBOX_BUSY |
-| 1201/1202 | UNAUTHENTICATED / PERMISSION_DENIED |
-| 1301/1302 | RATE_LIMITED / RESOURCE_EXHAUSTED |
-| 1401/1402 | DEADLINE_EXCEEDED / CANCELLED |
-| 1501/1502/1503 | BACKEND_UNAVAILABLE / BACKEND_ERROR / BACKEND_PROTOCOL_ERROR |
-| 1901 | INTERNAL_ERROR |
+| CreateSandbox | backend+template 查配置；spec 必须精确匹配模板；创建并验证 envd 健康后成功。健康检查失败仍保留已获取资源的 Proxy ID。 |
+| RunStep | 用 Proxy sandbox_id 找到不可变的后端绑定；解析 arguments_json 对象后运行 bash/read/write/edit；结果为 result_json。 |
+| PauseSandbox | 请求暂停并轮询控制面直到 paused；204 本身不代表暂停完成。 |
+| ResumeSandbox | 恢复/连接并检查 envd；使用创建时接受的 TTL，Proxy ID 不变；不能借此缩短后端已有 TTL。 |
+| DeleteSandbox | oneof 为 sandbox_id 或 create_request_id。对已知资源删除并观察控制面 404；返回 cleanup_confirmed。 |
+| GetStatus | oneof 为 sandbox_id 或 operation_request_id。查询沙箱会访问后端；操作查询读取本进程记录及原始最终响应。 |
 
-status 可包含 source、resource_type、HTTP 状态、Connect 错误码、Retry-After 秒数转换的 retry_after_ms。原始后端消息不透传，以免暴露凭据或命令数据。HTTP 200 的 Connect 流仍需检查 EndStreamResponse。缺帧、坏 JSON、缺少退出事件、结束后还有数据等均返回 BACKEND_PROTOCOL_ERROR。
+`SandboxInfo.sandbox_id` 是 `ap-<随机进程标识>-<序号>`，不接受裸后端 ID。绑定不受调用者改变；成功删除留下墓碑，重复删除成功。对已知 ID 观察到后端 404 后标记 DELETED；对从未记录的 ID 返回 NOT_FOUND，不推断资源不存在。
 
-## E2B 兼容边界与计时
+READY 要求本次就绪检查通过；PAUSED 来自后端状态；过渡中或未完成健康检查时返回 UNKNOWN。GetStatus 的读取可以成功且目标状态 UNKNOWN。读取后端失败时返回 ERROR_STATUS_UNAVAILABLE。observed_at_unix_ms 是观察时间，不是耗时。
 
-控制面使用 `/sandboxes`、`/{id}`、`/{id}/pause`、`/{id}/connect`；envd 使用 `/process.Process/Start`、`/process.Process/SendSignal`、`/filesystem.Filesystem/Stat`、`/files`、`/health`。Start 使用 Connect JSON framing，普通 unary RPC 使用 application/json。未实现通用 gRPC 客户端。
+## 模板与资源
 
-要求可识别的 envd 稳定版本 >=0.3.0。版本 <0.4.0 且未配置 user 时采用 user 身份；>=0.5.7 使用 octet-stream 上传，否则 multipart。未知或预发布版本明确拒绝，不猜测能力。云端 profile 仍需真实环境契约测试。
+后端配置 templates 中每个别名需指定 backend_template_id、cpu_count、memory_mib。Create.template 选择别名，SandboxInfo.template 返回实际后端模板 ID（优先用后端响应）。effective_spec 来自经部署方核实的模板配置；effective_ttl_seconds 为后端接受的创建 TTL，不是随时间递减的剩余寿命。
 
-timing 使用微秒：proxy_total_us 包含整个服务处理；queue_us 当前包含入队前校验及工作队列等待；preflight/operation/cleanup 统计相应 HTTP 请求时长；readiness 额外包含轮询间隔；backend_total_us 为全部实际 HTTP 请求时长之和。字段不必严格相加等于总时长（另有解析及本地处理）。后端请求数量包括健康检查和清理。客户端独立记录 rpc_wall_ms，不能将 Proxy 观测的 HTTP 耗时视为沙箱内部纯执行时间。
+未知后端返回 ERROR_UNSUPPORTED_BACKEND；未配置模板规格或请求规格不匹配返回 ERROR_UNSUPPORTED_CAPABILITY；CPU/内存为 0 返回 ERROR_INVALID_ARGUMENT。不会擅自修改模板资源、忽略 spec，或把 MiB 当十进制 MB。若部署改变模板规格，需要同时更新配置并重新验收。
+
+## 工具参数与 result_json
+
+arguments_json 必须是对象，拒绝未知字段；文件路径及显式 cwd 必须为沙箱内绝对路径。
+
+| tool | 必填参数 | 可选参数 |
+|---|---|---|
+| bash | command | cwd、env |
+| read | path | 无 |
+| write | path、content | 无 |
+| edit | path、oldString、newString | 无 |
+
+bash 运行 `/bin/bash -l -c`，非交互模式。典型 result_json 解析后为：
+
+```json
+{
+  "tool": "bash", "stdout": "hello", "stderr": "",
+  "stdout_base64": "aGVsbG8=", "stderr_base64": "",
+  "exit_code": 0, "pid": 123,
+  "termination": "EXITED", "termination_confirmed": true,
+  "stdout_truncated": false, "stderr_truncated": false,
+  "effective_execution_timeout_ms": 10000
+}
+```
+
+exit_code、pid 未知时为 JSON null，不能把未知退出码写成 0。stdout/stderr 是 UTF-8 显示文本，无效字节替换；base64 字段保留截断后的精确字节。termination 为 UNKNOWN/EXITED/TIMED_OUT/CANCELLED/SIGNALLED。非零退出是有效工具返回，success=true；任务是否通过由 Client 判定。
+
+其他工具结果：
+
+```json
+{"tool":"read","content":"文本","size_bytes":6}
+{"tool":"write","bytes_written":6}
+{"tool":"edit","replacement_count":1,"bytes_written":6}
+```
+
+失败前没有工具结果时 result_json 为字符串 `"null"`；有部分 bash 结果时仍保留输出和未知退出码。JSON 内字节计数是整数；外层 Protobuf JSON 的 uint64 字段按 protobuf 规则通常为字符串。
+
+文本文件 UTF-8，允许内容 NUL；单文件上限 8 MiB，stdout/stderr 各保留前 1 MiB。最终序列化结果仍受 16 MiB RPC 上限约束。write 覆盖但要求父目录存在；edit 要求非空 oldString 唯一字面匹配（含重叠匹配），读改写不对其他进程保证原子性。
+
+## 超时
+
+| 方法 | timeout_ms 含义 | 上限 |
+|---|---|---:|
+| Create/Pause/Resume | 排队、请求、状态/健康检查的总预算 | 300000 |
+| Delete | 排队、删除、缺失确认的总预算 | 120000 |
+| RunStep bash | 命令执行预算；Proxy 另加 7000ms 用于排队/前置和清理 | 900000 |
+| RunStep 文件 | 本次工具操作总预算，含排队/前置 | 120000 |
+| GetStatus | 无请求超时字段；Proxy 固定 10000ms | 10000 |
+
+bash 实际预算为 min(请求预算, Proxy 剩余预算-2000ms)。不保证排队后仍能获得完整执行时长。客户端传输超时默认 Proxy 总预算+2000ms，max_retry=0；调用者超时或断连不保证远端立即停止。
+
+工具执行超时返回 ERROR_TOOL_TIMEOUT；排队、前置或生命周期超时返回 ERROR_OPERATION_TIMEOUT。对异常中断的命令流，已知 PID 时尝试 SIGKILL；发送信号的确认不等于退出确认。必须通过沙箱清理收尾。
+
+## 操作记录与重复请求
+
+Mutation 入队前原子登记 request_id 和请求摘要；摘要包含消息类型、所有字段及 meta。相同 ID/内容返回 ERROR_DUPLICATE_REQUEST，内容不同返回 ERROR_REQUEST_ID_CONFLICT，均不重做后端调用，也不覆盖原记录。以新的 meta.request_id 调用 GetStatus(operation_request_id=原ID) 读取结果。
+
+- ACCEPTED：登记且等待执行。
+- RUNNING：正在处理，可能尚未向后端提交。
+- SUCCEEDED/FAILED：已知最终结果，OperationRecord 恰好含一个匹配 kind 的原始 final_response。
+- UNKNOWN：提交结果不确定，或无法构造/保存完整响应；不返回 final_response。
+- dispatch_state：尚未向目标后端发送为 NOT_STARTED；请求可能送达为 MAY_HAVE_STARTED；收到 HTTP 响应或进程启动事件为 STARTED。STARTED 不等于成功。
+
+只读 GetStatus 不生成操作记录，不缓存读取请求 ID；Client 仍必须给每次读取分配新 ID。它不得复用 mutation 的 ID。
+
+记录仅存在当前进程：不持久化、不跨实例、不自动淘汰、不保证 exactly-once。默认最多 10000 条，记录预算 256 MiB，每个在途操作预留约 16 MiB；容量不足在执行前返回 ERROR_STORAGE_UNAVAILABLE。查询已有操作不消耗 mutation 配额。请求摘要不保存原始命令，但原始响应可能含命令输出和文件内容。
+
+创建未提交或已明确拒绝且无资源时，Delete(create_request_id) 可以确认无需清理；创建仍执行时返回 ERROR_INVALID_STATE；创建结果未知且没有 ID 时返回 ERROR_STATUS_UNAVAILABLE、cleanup_confirmed=false，不把“没拿到 ID”解释为“没创建”。没有实现自动列举并收敛未知创建；创建 metadata 含 agent_proxy_instance、agent_proxy_request，可供部署方人工核对。
+
+控制面 404 是本实现对已知资源的清理确认依据，不证明宿主物理资源已经回收。后端必须保证删除的资源不会再次出现。若部署将 pausing 提前报告为 paused，Proxy 无法额外证明完整内存快照已持久化；需真实部署验收。
+
+## 错误与计时
+
+严格使用协作方 ErrorCode 数值。鉴权、限流、后端协议/传输异常映射 ERROR_BACKEND_ERROR；文件编辑冲突、沙箱忙及队列满映射 ERROR_INVALID_STATE；不支持的工具映射 ERROR_UNSUPPORTED_TOOL，其他能力缺失映射 ERROR_UNSUPPORTED_CAPABILITY；超大输入/输出映射 ERROR_INVALID_ARGUMENT（响应构造超限可能为传输失败）。不自行扩充 IDL 枚举。
+
+proxy_elapsed 是 Proxy 总毫秒数，存在且为 0 表示实际测量不足 1ms；不是未测量。旧版阶段微秒计时保留在 Proxy JSON 日志中，避免修改协作方 IDL。客户端需独立测量 RPC 墙钟耗时，不能把 Proxy 耗时当成沙箱内纯执行耗时。

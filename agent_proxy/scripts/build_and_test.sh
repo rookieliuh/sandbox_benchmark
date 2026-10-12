@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/use_local_deps.sh"
+PROTOBUF_ARGS=()
+if [[ -f "$AP_LOCAL_PREFIX/include/google/protobuf/message.h" && -f "$AP_LOCAL_PREFIX/lib/libprotobuf.so" ]]; then
+  PROTOBUF_ARGS=("-DProtobuf_INCLUDE_DIR=$AP_LOCAL_PREFIX/include"
+    "-DProtobuf_LIBRARY=$AP_LOCAL_PREFIX/lib/libprotobuf.so"
+    "-DProtobuf_PROTOC_EXECUTABLE=$AP_LOCAL_PREFIX/bin/protoc"
+    "-DProtobuf_PROTOC_LIBRARY=$AP_LOCAL_PREFIX/lib/libprotoc.so")
+fi
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 BRPC_ROOT="${BRPC_ROOT:-$ROOT/.deps/brpc-install}"
 JOBS="${JOBS:-2}"
@@ -25,10 +33,10 @@ if [[ ! -f "$BRPC_ROOT/include/brpc/server.h" ]]; then
   fi
   cmake -S "$SOURCE" -B "$ROOT/.deps/brpc-build" \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$BRPC_ROOT" \
-    -DBUILD_UNIT_TESTS=OFF -DBUILD_BRPC_TOOLS=OFF -DWITH_GLOG=OFF -DWITH_SNAPPY=OFF
+    -DBUILD_UNIT_TESTS=OFF -DBUILD_BRPC_TOOLS=OFF -DWITH_GLOG=OFF -DWITH_SNAPPY=OFF "${PROTOBUF_ARGS[@]}"
   cmake --build "$ROOT/.deps/brpc-build" --parallel "$JOBS"
   cmake --install "$ROOT/.deps/brpc-build"
 fi
-cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBRPC_ROOT="$BRPC_ROOT"
+cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBRPC_ROOT="$BRPC_ROOT" "${PROTOBUF_ARGS[@]}"
 cmake --build "$BUILD_DIR" --parallel "$JOBS"
 ctest --test-dir "$BUILD_DIR" --output-on-failure

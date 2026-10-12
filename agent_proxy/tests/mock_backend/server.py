@@ -113,6 +113,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(200, {"calls": self.backend.calls,
                                               "sandboxes": list(self.backend.sandboxes)})
             with self.backend.lock:
+                if path == "/sandboxes" and self.command == "GET":
+                    limit = int(query.get("limit", ["100"])[0])
+                    return self.respond(200, [self.backend.info(sb) for sb in list(self.backend.sandboxes.values())[:limit]])
                 if path == "/sandboxes" and self.command == "POST":
                     data = json.loads(body)
                     if not data.get("templateID") or data.get("timeout", 0) <= 0:
@@ -141,8 +144,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not sb:
                     return self.respond(404, {})
                 if len(parts) == 2 and self.command == "GET":
+                    if sb.get("pause_polls", 0):
+                        sb["pause_polls"] -= 1
+                        if not sb["pause_polls"]:
+                            sb["state"] = "paused"
                     return self.respond(200, self.backend.info(sb))
                 if len(parts) == 2 and self.command == "DELETE":
+                    if sb["template"] == "mock-delete-stuck":
+                        return self.respond(204)
                     for process in sb["processes"].values():
                         process.set()
                     del self.backend.sandboxes[sid]
@@ -151,6 +160,9 @@ class Handler(BaseHTTPRequestHandler):
                     if sb["state"] == "paused":
                         return self.respond(409, {})
                     sb["state"] = "paused"
+                    if sb["template"] == "mock-slow-pause":
+                        sb["state"] = "pausing"
+                        sb["pause_polls"] = 2
                     return self.respond(204)
                 if len(parts) == 3 and parts[2] == "connect" and self.command == "POST":
                     data = json.loads(body)

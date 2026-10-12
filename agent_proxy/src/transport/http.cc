@@ -174,6 +174,8 @@ HttpResponse HttpClient::perform(const HttpRequest& req, OperationContext& ctx) 
   }
   if (req.mutation)
     ctx.outcome = Outcome::Unknown;
+  if (req.phase == Phase::Operation && !req.cleanup)
+    ctx.on_dispatch(false);
   ++ctx.timing.requests;
   Measure measure{ctx, req.phase};
   auto code = curl_easy_perform(curl);
@@ -191,6 +193,8 @@ HttpResponse HttpClient::perform(const HttpRequest& req, OperationContext& ctx) 
   long status = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
   transfer.response.status = static_cast<int>(status);
+  if (req.phase == Phase::Operation && !req.cleanup)
+    ctx.on_dispatch(true);
   return std::move(transfer.response);
 }
 void HttpClient::require_success(const HttpResponse& r, const HttpRequest& req,

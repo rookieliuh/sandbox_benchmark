@@ -1,52 +1,42 @@
-# Agent Proxy
+# Agent Proxy — benchmark.agent.v1
 
-C++17 / bRPC 中间层，向 Agent Sandbox Benchmark 暴露六个统一 RPC，通过 libcurl 访问 E2B/KASandbox 控制面 REST API 和 envd Connect API。首版仅包含 E2B 适配器。
+C++17 / bRPC 服务，提供 CreateSandbox、RunStep、PauseSandbox、ResumeSandbox、DeleteSandbox、GetStatus，通过 E2B 控制面 REST 和 envd Connect API 执行操作。AgentENV 和 CubeSandbox 尚未实现。
 
-## 验证状态
+## 协议
 
-当前开发机为 Windows，无 Linux、Docker 和 C++ 工具链。已运行的检查与尚未运行的检查见 [验证记录](docs/validation.md)。**本地 Mock 测试通过不代表 C++ 编译或完整 bRPC 端到端链路通过。** 服务器应执行下面的构建测试命令再验收。
+`proto/agent_proxy.proto` 使用协作方提供的 proto3 契约，包名 `benchmark.agent.v1`，服务名 `AgentProxyService`。本次迁移不修改协作方字段、编号或枚举。
 
-## Linux 服务器构建与测试
+这是一次不兼容升级。Client 和 Proxy 必须共同使用此版本重新生成代码；不能混用旧的 `agentproxy.v1` 请求。
 
-建议首先使用 Ubuntu 22.04、GCC 11、系统 Protobuf 3.12、bRPC 1.12.1。其他发行版可安装等价开发包。构建脚本不会执行 sudo 或修改系统软件。
+- [接口语义与结果 JSON](docs/interface.md)：发送给 Client 开发同事一起对齐。
+- [Linux 构建与日志](docs/linux-validation.md)。
+- [真实 E2B 验证步骤](docs/e2b-validation.md)。
+- [验证记录](docs/validation.md)：区分旧版本已通过的服务器测试和本次迁移待验证项。
 
-首次准备依赖：
-
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git pkg-config ca-certificates python3 \
-  libssl-dev libgflags-dev libprotobuf-dev libprotoc-dev protobuf-compiler \
-  libleveldb-dev zlib1g-dev libcurl4-openssl-dev nlohmann-json3-dev
-```
-
-完整的克隆、安装依赖、测试及日志回传命令见 [Linux 验证清单](docs/linux-validation.md)。克隆仓库后进入 `agent_proxy` 目录执行：
+## 在已有 Linux 服务器上更新
 
 ```bash
-bash scripts/build_and_test.sh
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  export JOBS=1 CTEST_PARALLEL_LEVEL=1
+  export BRPC_ROOT="$PWD/.deps/brpc-install" BUILD_DIR="$PWD/build"
+  export NO_PROXY="127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}"
+  export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+  nice -n 10 bash scripts/validate_linux.sh
+)
 ```
 
-该命令将：
+构建脚本自动加载项目 `.deps/local` 中已经安装的依赖。不会运行系统包管理器、修改系统动态库配置或重启已有服务。编译仍消耗资源，安装路径也不构成 root 权限隔离。
 
-1. 首次运行下载 bRPC 1.12.1，在项目 `.deps` 中编译和安装。
-2. 用 CMake 构建 `agent-proxy`、`agent-proxy-client`、`core-tests`。
-3. 执行 C++ 核心测试、Python Mock 协议测试和完整 bRPC 端到端测试。
+首次构建需要 Linux、GCC/C++17、CMake >=3.20、Python >=3.10、Protobuf（含 protoc 和 libprotoc 开发文件）、libcurl、OpenSSL、zlib、gflags、LevelDB、nlohmann/json >=3.9；脚本会按需在 `.deps` 内编译安装 bRPC 1.12.1。现有服务器使用 Protobuf 3.14.0、LevelDB 1.23、nlohmann/json 3.11.3。
 
-可用 `JOBS=4` 调整构建并行度，用 `BRPC_ROOT=/path/to/brpc` 复用已安装的兼容 bRPC。离线服务器需要预先安装依赖并提供 `BRPC_ROOT`。所有组件应使用同一套 Protobuf 库，避免 ABI 混用。
+CTest 保留三组：`core`、`mock-protocol`、`e2e`。e2e 启动真实 C++ Client/Proxy 和 Python Mock；还用 Mock 验证真实 E2B 冒烟脚本本身，不会连接真实 E2B。报告为 `build/test-results/e2e.json`。
 
-端到端测试会分配本机临时端口、启动和清理子进程；失败时返回非零退出码。报告在 `build/test-results/e2e.json`，同目录保留每次运行的 Mock/Proxy 日志、请求和响应。这些请求只含 Mock 数据。
+## 手动运行
 
-如果服务器有 Docker，也可以直接执行：
-
-```bash
-docker build -t agent-proxy-test .
-docker run --rm agent-proxy-test
-```
-
-Docker 构建阶段同样执行全部测试；本开发机尚未验证镜像构建。
-
-## 手动运行 Mock 链路
-
-在三个 Linux 终端中分别运行：
+分别在终端启动 Mock、Proxy、Client。每个运行 C++ 二进制的终端先在项目目录执行 `source scripts/use_local_deps.sh`，或将下面命令放进子 Shell。
 
 ```bash
 python3 tests/mock_backend/server.py --port 18080
@@ -62,65 +52,30 @@ export MOCK_E2B_API_KEY=mock-key
   --method=CreateSandbox --request=configs/create.example.json
 ```
 
-复制创建响应的 `sandbox.ref` 到后续请求，例如：
+从响应取 `sandbox.sandbox_id`（Proxy ID，不是后端 ID），用于后续请求。例如：
 
 ```json
 {
-  "context": {"request_id": "step-1", "timeout_ms": 65000},
-  "ref": {"backend": "mock", "sandbox_id": "mock-1"},
+  "sandbox_id": "替换为创建响应中的ID",
+  "step_id": 1,
   "tool": "bash",
-  "arguments_json": "{\"command\":\"printf hello\"}"
+  "arguments_json": "{\"command\":\"printf hello\"}",
+  "timeout_ms": 10000,
+  "meta": {"request_id": "step-example-1", "task_instance_id": "example-replay"}
 }
 ```
 
-保存为请求文件后，调用客户端 `--method=RunStep --request=/path/to/request.json`。客户端使用原生 `baidu_std` bRPC 协议，不通过 HTTP JSON 绕过 RPC 层；`--request=-` 可读取 stdin。
+客户端使用 `baidu_std`，自动重试为 0；`--request=-` 接收 stdin。退出码：0 表示 `success=true && error.code=ERROR_OK`；2 为结构化错误；3 为传输失败且结果可能未知；1 为本地输入/配置错误。命令非零退出仍是有效工具结果，检查 `result_json` 中的 `exit_code`。
 
-客户端退出码：0 为 `status=OK`，2 为结构化业务/后端错误，3 为 RPC 传输失败，1 为本地配置或输入错误。bash 非零退出仍返回客户端退出码 0，任务层应检查 `bash.exit_code`。
+## 状态与边界
 
-## 连接真实后端
+- Create/Resume 成功必须健康检查通过；Pause 轮询控制面确认 paused；Delete 后确认 404，才报告清理确认。
+- 资源规格通过配置的 `templates` 映射精确校验。模板实际 CPU/内存需部署方核实，不会通过忽略参数伪造符合规格的成功。
+- 同一实例内每个沙箱的 RunStep/Pause/Resume/Delete 互斥，GetStatus 可并发；控制与工具使用独立有界工作池。
+- 相同请求 ID 不重新执行；相同内容返回 `ERROR_DUPLICATE_REQUEST`，不同内容返回 `ERROR_REQUEST_ID_CONFLICT`。原始结果用新 ID 调用 GetStatus 查询。
+- 操作记录与 Proxy 沙箱绑定仅保存在进程内，默认最多 10000 条操作、256 MiB 记录预算（包括每个在途操作约 16 MiB 的预留）。不自动淘汰记录；容量不足在执行前返回 `ERROR_STORAGE_UNAVAILABLE`。参数为 `--max_records`、`--record_memory_mib`。
+- 没有持久化/跨实例恢复。运行一次 benchmark 时固定使用同一 Proxy 进程，清理结束前不要重启。重启后未知 ID 返回 NOT_FOUND，并不证明后端资源不存在。
+- 创建结果未知且无 ID 时，按创建请求 ID 删除返回 `ERROR_STATUS_UNAVAILABLE` 和 `cleanup_confirmed=false`。需要部署方按创建 metadata 查找/清理，不保证自动发现迟到创建的资源。
+- 默认只监听回环地址；没有多租户认证。真实配置放在忽略的 `configs/*.local.json`，密钥使用环境变量；不要提交密钥。
 
-从 `configs/e2b.example.json` 复制所需后端项，删除不用的项，设置各项 `api_key_env` 指定的环境变量。配置中不保存 API Key。
-
-- `api_url`：控制面 API 根地址。
-- `envd_url_pattern`：可选固定网关或包含 `{sandbox_id}` 的 URL。
-- 未设置 `envd_url_pattern` 时，使用 `envd_scheme://49983-{id}.{domain}`，domain 优先采用后端响应，再采用 `sandbox_domain`。
-- 数据面携带 `X-Access-Token`、`E2b-Sandbox-Id`、`E2b-Sandbox-Port`。可选 `user` 控制命令和文件操作身份。
-- `profile` 接受 `kasandbox`、`e2b_cloud`；目前二者使用同一份已核对的 REST/Connect 契约。profile 明确标识测试目标，不意味着云端差异已完成实机验证。
-
-真实后端测试必须由部署方提供 API 地址、模板、凭据和可达的数据面域名。Mock 的 `base` 模板与 `mock:*` 命令不能用于真实后端。
-
-## 实现范围
-
-详见 [接口与语义](docs/interface.md)。主要约定：
-
-- 六个同步 RPC，RunStep 支持 bash/read/write/edit。
-- 默认要求 Create/Resume 的 envd `/health` 可用；可以 `wait_ready=false` 只等待控制面确认。
-- 同一实例内，同一沙箱的 RunStep/Pause/Resume/Delete 互斥；GetStatus 可并发。
-- 独立控制面和工具工作池，有界队列；超时包含排队和前置查询。
-- 无自动业务重试、无幂等缓存，`request_id` 只用于追踪。
-- libcurl 为有副作用的目标请求使用新连接，防止失效复用连接触发透明重放；只读请求复用连接。Benchmark 应记录这一连接策略。
-- 文件工具支持 UTF-8 文本；单文件上限 8 MiB。输出分别保留 stdout/stderr 前 1 MiB。
-- 关闭连接不等于杀死命令；错误/超时时尝试向已知 PID 发送 SIGKILL，不把信号确认当成退出确认。
-
-Mock 是内存协议模型，**不会执行主机 shell，也不模拟真实虚拟机或快照性能**。支持 `printf hello`、`exit 2`、`mock:stderr`、`mock:echo:文本`、`mock:sleep:毫秒` 等确定性命令；未知命令返回 127。故障注入仅存在于 Mock。
-
-运行参数：`--control_threads=4`、`--step_threads=16`、`--queue_size=128`。默认仅监听回环地址。`--admin_port` 可启用 bRPC 内部诊断端口，提供 `agent_proxy_calls`、`agent_proxy_failures`、`agent_proxy_latency` 等 bvar 指标；默认关闭内部服务。首版没有对外部多租户调用方实现身份认证，部署范围是受控 Benchmark 网络。
-
-## 项目结构
-
-```text
-proto/agent_proxy.proto       六个 RPC、请求响应和错误枚举
-src/core/                    内部类型、deadline、有界线程池、沙箱互斥
-src/service/                 bRPC 服务、调度和响应转换
-src/adapters/e2b/            E2B/Envd 适配和 Connect 编解码
-src/transport/               libcurl 传输、错误映射、阶段计时
-src/tools/                   工具参数校验、文本替换
-src/config/                  后端配置读取
-client/                      通用原生 bRPC 测试客户端
-tests/unit/                  C++ 核心测试
-tests/mock_backend/          Python 协议 Mock 及其测试
-tests/integration/           完整 bRPC 链路测试驱动
-scripts/build_and_test.sh    Linux 构建及验收入口
-```
-
-尚不包含 AgentENV/CubeSandbox、分布式锁、持久化操作账本、后台命令句柄或客户端流式输出。进程重启不保存本地操作状态；对已有沙箱可用 `(backend, sandbox_id)` 重新查询。
+HTTP 目标变更请求禁用连接复用以避免 libcurl 的透明重放；没有自动业务重试。Mock 只模拟协议，不能证明真实 E2B 可用性、性能或全内存快照语义。

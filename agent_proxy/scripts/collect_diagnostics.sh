@@ -2,6 +2,7 @@
 # Collect only build/test diagnostics, never environment values or backend credentials.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/use_local_deps.sh"
 cd "$ROOT"
 mkdir -p validation-logs test-results
 {
@@ -21,6 +22,9 @@ mkdir -p validation-logs test-results
       build-essential cmake git pkg-config python3 libssl-dev libgflags-dev \
       libprotobuf-dev libprotoc-dev protobuf-compiler libleveldb-dev zlib1g-dev \
       libcurl4-openssl-dev nlohmann-json3-dev || true
+  fi
+  if command -v rpm >/dev/null 2>&1; then
+    rpm -q protobuf protobuf-devel protobuf-compiler gflags-devel libcurl-devel openssl-devel zlib-devel leveldb-devel || true
   fi
   if [[ -d .deps/brpc-src/.git ]]; then git -C .deps/brpc-src rev-parse HEAD; fi
 } > validation-logs/environment.txt 2>&1

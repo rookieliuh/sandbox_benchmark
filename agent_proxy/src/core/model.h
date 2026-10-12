@@ -31,7 +31,13 @@ enum class Code : int {
   BackendUnavailable = 1501,
   BackendError = 1502,
   BackendProtocolError = 1503,
-  InternalError = 1901
+  InternalError = 1901,
+  UnsupportedBackend,
+  UnsupportedTool,
+  DuplicateRequest,
+  RequestIdConflict,
+  StatusUnavailable,
+  StorageUnavailable
 };
 enum class Source { Proxy, Control, Envd };
 enum class Outcome { NotStarted, Completed, Unknown };
@@ -123,6 +129,8 @@ struct OperationContext {
   std::function<bool()> cancelled = [] { return false; };
   Timing timing;
   Outcome outcome = Outcome::NotStarted;
+  // Before an operation request can reach the backend, and after HTTP acknowledgement.
+  std::function<void(bool)> on_dispatch = [](bool) {};
   int64_t remaining_ms() const {
     return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
   }

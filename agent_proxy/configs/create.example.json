@@ -1,8 +1,16 @@
 {
-  "context": {"request_id": "example-create", "timeout_ms": 60000},
+  "template": "base",
   "backend": "mock",
-  "template_id": "base",
+  "spec": {
+    "cpu_count": 1,
+    "memory_mib": 512
+  },
   "ttl_seconds": 300,
-  "wait_ready": true,
-  "metadata": {"benchmark_run": "example"}
+  "timeout_ms": 60000,
+  "meta": {
+    "request_id": "create-example-1",
+    "run_id": "example-run",
+    "task_instance_id": "example-replay",
+    "phase": "PHASE_CREATE"
+  }
 }

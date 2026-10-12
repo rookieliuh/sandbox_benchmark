@@ -17,7 +17,8 @@ DEFINE_int32(rpc_timeout_ms, 0, "Client transport timeout; 0 uses request budget
 
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  auto* method = agentproxy::v1::AgentProxyService::descriptor()->FindMethodByName(FLAGS_method);
+  auto* method =
+      benchmark::agent::v1::AgentProxyService::descriptor()->FindMethodByName(FLAGS_method);
   if (!method || FLAGS_request.empty()) {
     std::cerr << "valid --method and --request required\n";
     return 1;
@@ -51,25 +52,20 @@ int main(int argc, char** argv) {
     std::cerr << "invalid request JSON\n";
     return 1;
   }
-  auto* context_field = request->GetDescriptor()->FindFieldByName("context");
-  const auto& context = request->GetReflection()->GetMessage(*request, context_field);
-  auto* timeout_field = context.GetDescriptor()->FindFieldByName("timeout_ms");
-  int budget = 60000;
-  if (FLAGS_method == "GetStatus")
-    budget = 10000;
-  if (FLAGS_method == "DeleteSandbox")
-    budget = 30000;
-  if (FLAGS_method == "RunStep") {
-    auto* tool = request->GetDescriptor()->FindFieldByName("tool");
-    budget = request->GetReflection()->GetString(*request, tool) == "bash" ? 65000 : 30000;
-  }
-  if (context.GetReflection()->HasField(context, timeout_field)) {
-    auto ms = context.GetReflection()->GetUInt32(context, timeout_field);
+  auto* timeout_field = request->GetDescriptor()->FindFieldByName("timeout_ms");
+  int budget = 10000;
+  if (timeout_field) {
+    auto ms = request->GetReflection()->GetUInt32(*request, timeout_field);
     if (ms > 900000) {
       std::cerr << "timeout too large\n";
       return 1;
     }
     budget = static_cast<int>(ms);
+  }
+  if (FLAGS_method == "RunStep") {
+    auto* tool = request->GetDescriptor()->FindFieldByName("tool");
+    if (request->GetReflection()->GetString(*request, tool) == "bash")
+      budget += 7000;
   }
   brpc::Channel channel;
   brpc::ChannelOptions options;
@@ -92,17 +88,20 @@ int main(int argc, char** argv) {
   google::protobuf::util::JsonPrintOptions print;
   print.preserve_proto_field_names = true;
   print.add_whitespace = true;
+  print.always_print_primitive_fields = true;
   std::string output;
   if (!google::protobuf::util::MessageToJsonString(*response, &output, print).ok()) {
     std::cerr << "response serialization failed\n";
     return 1;
   }
   std::cout << output << '\n';
-  const auto* field = response->GetDescriptor()->FindFieldByName("context");
-  const auto& rc = response->GetReflection()->GetMessage(*response, field);
-  const auto& status =
-      rc.GetReflection()->GetMessage(rc, rc.GetDescriptor()->FindFieldByName("status"));
+  const auto* field = response->GetDescriptor()->FindFieldByName("error");
+  const auto& status = response->GetReflection()->GetMessage(*response, field);
   const auto code =
       status.GetReflection()->GetEnumValue(status, status.GetDescriptor()->FindFieldByName("code"));
-  return code == 0 ? 0 : 2;
+  auto* success = response->GetDescriptor()->FindFieldByName("success");
+  return code == benchmark::agent::v1::ERROR_OK &&
+                 response->GetReflection()->GetBool(*response, success)
+             ? 0
+             : 2;
 }

@@ -6,7 +6,14 @@
       "api_url": "http://api.sandbox.example:3000",
       "api_key_env": "E2B_API_KEY",
       "sandbox_domain": "sandbox.example",
-      "envd_scheme": "http"
+      "envd_scheme": "http",
+      "templates": {
+        "benchmark-base": {
+          "backend_template_id": "REPLACE_WITH_VERIFIED_TEMPLATE_ID",
+          "cpu_count": 1,
+          "memory_mib": 512
+        }
+      }
     },
     "e2b-cloud": {
       "type": "e2b",
@@ -14,7 +21,14 @@
       "api_url": "https://api.e2b.dev",
       "api_key_env": "E2B_CLOUD_API_KEY",
       "sandbox_domain": "e2b.app",
-      "envd_scheme": "https"
+      "envd_scheme": "https",
+      "templates": {
+        "benchmark-base": {
+          "backend_template_id": "REPLACE_WITH_VERIFIED_TEMPLATE_ID",
+          "cpu_count": 1,
+          "memory_mib": 512
+        }
+      }
     }
   }
 }
