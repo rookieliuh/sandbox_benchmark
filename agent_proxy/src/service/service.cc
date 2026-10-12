@@ -254,13 +254,22 @@ void Service::finish(OperationContext& ctx, const pb::RequestMeta& meta, Respons
   if (error)
     failures << 1;
   latency << total;
-  LOG(INFO)
-      << Json{{"request_id", meta.request_id()},          {"code", detail->code()},
-              {"outcome", static_cast<int>(ctx.outcome)}, {"total_us", total},
-              {"queue_us", ctx.timing.queue_us},          {"preflight_us", ctx.timing.preflight_us},
-              {"operation_us", ctx.timing.operation_us},  {"readiness_us", ctx.timing.readiness_us},
-              {"cleanup_us", ctx.timing.cleanup_us},      {"backend_requests", ctx.timing.requests}}
-             .dump(-1, ' ', false, Json::error_handler_t::replace);
+  LOG(INFO) << Json{{"request_id", meta.request_id()},
+                    {"code", detail->code()},
+                    {"outcome", static_cast<int>(ctx.outcome)},
+                    {"total_us", total},
+                    {"queue_us", ctx.timing.queue_us},
+                    {"preflight_us", ctx.timing.preflight_us},
+                    {"operation_us", ctx.timing.operation_us},
+                    {"readiness_us", ctx.timing.readiness_us},
+                    {"cleanup_us", ctx.timing.cleanup_us},
+                    {"backend_requests", ctx.timing.requests},
+                    {"envd_health",
+                     {{"attempts", ctx.envd_health.attempts},
+                      {"last_http_status", ctx.envd_health.last_http_status},
+                      {"last_transport_code", ctx.envd_health.last_transport_code},
+                      {"http_counts", ctx.envd_health.http_counts}}}}
+                   .dump(-1, ' ', false, Json::error_handler_t::replace);
 }
 
 template <class Request, class Response>

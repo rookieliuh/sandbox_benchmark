@@ -72,6 +72,11 @@ def main():
         response = json.loads(result.stdout)
         code = response.get('error', {}).get('code')
         print(f'{method}: {code}', flush=True)
+        if code != 'ERROR_OK':
+            detail = response.get('error', {})
+            # These are sanitized Proxy errors, never the raw backend response or config.
+            print('Proxy error:', json.dumps({k: detail.get(k, '') for k in
+                                             ('message', 'backend_code')}, ensure_ascii=False), flush=True)
         if require_success and (not response.get('success') or code != 'ERROR_OK'):
             raise RuntimeError(f'{method} failed: {code}')
         return response
@@ -142,6 +147,7 @@ def main():
                     time.sleep(0.5)
                 result = rpc('DeleteSandbox', {'create_request_id': create_id}, require_success=False)
                 cleaned = bool(result.get('success') and result.get('cleanup_confirmed'))
+                print(f'Cleanup confirmed: {str(cleaned).lower()}', flush=True)
             except (Exception, KeyboardInterrupt):
                 cleaned = False
         if process is not None:
@@ -156,7 +162,12 @@ def main():
             print('CLEANUP UNCONFIRMED: retain this create request ID; ask deployment owner to locate '
                   'the sandbox by metadata.agent_proxy_request. Do not delete unrelated sandboxes.', flush=True)
     passed = success and cleaned
-    print('PASS: real E2B lifecycle and tools verified; cleanup confirmed by control API.' if passed else 'FAIL: smoke test or cleanup incomplete.')
+    if passed:
+        print('PASS: real E2B lifecycle and tools verified; cleanup confirmed by control API.')
+    elif cleaned:
+        print('FAIL: smoke test failed; cleanup confirmed by control API.')
+    else:
+        print('FAIL: smoke test or cleanup incomplete.')
     return 0 if passed else 1
 
 

@@ -136,3 +136,19 @@ PY
 ```
 
 真实测试报错优先贴脚本标准输出；不要直接把可能含业务信息的日志全文发送出来。
+
+## 6. 创建成功后仍等待就绪的诊断
+
+CreateSandbox 的 RPC 时间预算包括 POST /sandboxes 和随后访问 envd /health 的时间。
+TTL 是沙箱存活时间，与 RPC 等待时间不同。控制面创建成功不保证数据面可用。
+
+Proxy 的每条操作汇总日志包含 envd_health：attempts、last_http_status、
+last_transport_code 和 http_counts。只记录状态码/次数，不记录响应正文、URL、密钥或访问令牌。
+HTTP 状态为 0 表示最后一次检查没有取得完整 HTTP 响应；CURL_N 是 libcurl 错误编号，
+AP_N 是 Proxy 内部错误编号。就绪超时也会在 RPC error.message 中携带最后一次检查结果，
+冒烟脚本直接打印该错误及独立的 Cleanup confirmed 字段。
+
+首次就绪检查立即发出，失败后间隔 250ms、500ms，之后最多每秒一次，受原 RPC 截止时间约束。
+这只改变 GET /health 的重试频率，不重试创建请求，不增加原有超时，也不修改共享后端配置。
+HTTP 404 可能涉及沙箱路由/注册，502/503/504 可能涉及上游可用性；不能仅凭一个状态码确定根因。
+删除成功后的健康检查会失去原有诊断价值，不要用已删除沙箱的 404 反推创建时的状态。

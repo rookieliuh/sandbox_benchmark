@@ -1,4 +1,5 @@
 import base64
+import http.client
 import json
 import os
 from pathlib import Path
@@ -41,11 +42,21 @@ class MockTests(unittest.TestCase):
             with error:
                 return error.code, error.read()
 
-    def create(self):
-        code, data = self.request("POST", "/sandboxes", {"templateID": "base", "timeout": 300,
+    def create(self, template="base"):
+        code, data = self.request("POST", "/sandboxes", {"templateID": template, "timeout": 300,
                                                           "autoPause": False, "autoResume": {"policy": "off"}})
         self.assertEqual(code, 201)
         return json.loads(data)["sandboxID"]
+
+    def test_health_failures_preserve_cleanup_target(self):
+        unready = self.create("mock-unready")
+        self.assertEqual(self.request("GET", f"/envd/{unready}/health", envd=True)[0], 503)
+        dropped = self.create("mock-health-drop")
+        with self.assertRaises(http.client.RemoteDisconnected):
+            self.request("GET", f"/envd/{dropped}/health", envd=True)
+        for sid in (unready, dropped):
+            self.assertEqual(self.request("GET", f"/sandboxes/{sid}")[0], 200)
+            self.assertEqual(self.request("DELETE", f"/sandboxes/{sid}")[0], 204)
 
     def test_lifecycle_preserves_files(self):
         sid = self.create()

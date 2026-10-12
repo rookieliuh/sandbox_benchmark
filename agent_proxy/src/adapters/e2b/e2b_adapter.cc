@@ -175,31 +175,56 @@ Json E2BAdapter::unary(const Connection& c, const std::string& path, const Json&
 }
 void E2BAdapter::ready(const Connection& c, OperationContext& ctx, Result& out) const {
   out.info->envd_ready = false;
-  while (true) {
-    ctx.check();
-    auto r = envd(c, "GET", "/health", Phase::Readiness);
-    r.resource = "sandbox";
-    r.timeout_ms = std::min<int64_t>(1000, ctx.remaining_ms());
-    r.max_body = 65536;
-    try {
-      auto response = http_.perform(r, ctx);
-      if (response.status == 200) {
-        out.info->envd_ready = true;
-        out.basis = Basis::EnvdReady;
-        return;
+  auto& health = ctx.envd_health;
+  int64_t delay_ms = 250;
+  try {
+    while (true) {
+      ctx.check();
+      auto r = envd(c, "GET", "/health", Phase::Readiness);
+      r.resource = "sandbox";
+      r.timeout_ms = std::min<int64_t>(1000, ctx.remaining_ms());
+      r.max_body = 65536;
+      ++health.attempts;
+      health.last_http_status = 0;
+      health.last_transport_code.clear();
+      try {
+        auto response = http_.perform(r, ctx);
+        health.last_http_status = response.status;
+        ++health.http_counts[std::to_string(response.status)];
+        if (response.status == 200) {
+          out.info->envd_ready = true;
+          out.basis = Basis::EnvdReady;
+          return;
+        }
+        if (response.status != 502 && response.status != 503 && response.status != 504 &&
+            response.status != 404)
+          HttpClient::require_success(response, r, ctx);
+      } catch (const Error& e) {
+        if (e.code != Code::BackendUnavailable && e.code != Code::DeadlineExceeded)
+          throw;
+        health.last_transport_code = e.backend_code.empty()
+                                         ? "AP_" + std::to_string(static_cast<int>(e.code))
+                                         : e.backend_code;
       }
-      if (response.status != 502 && response.status != 503 && response.status != 504 &&
-          response.status != 404)
-        HttpClient::require_success(response, r, ctx);
-    } catch (const Error& e) {
-      if (e.code != Code::BackendUnavailable && e.code != Code::DeadlineExceeded)
-        throw;
+      ctx.check();
+      auto start = Clock::now();
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(std::min<int64_t>(delay_ms, ctx.remaining_ms())));
+      ctx.timing.readiness_us += micros(start, Clock::now());
+      delay_ms = std::min<int64_t>(1000, delay_ms * 2);
     }
-    ctx.check();
-    auto start = Clock::now();
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(std::min<int64_t>(50, ctx.remaining_ms())));
-    ctx.timing.readiness_us += micros(start, Clock::now());
+  } catch (const Error& e) {
+    if (e.code != Code::DeadlineExceeded)
+      throw;
+    Error error(Code::DeadlineExceeded,
+                "envd readiness deadline exceeded; attempts=" + std::to_string(health.attempts) +
+                    "; last_http_status=" + std::to_string(health.last_http_status) +
+                    "; last_transport_code=" +
+                    (health.last_transport_code.empty() ? "none" : health.last_transport_code),
+                Source::Envd, "sandbox");
+    error.http_status = health.last_http_status;
+    error.backend_code = health.last_transport_code;
+    throw error;
   }
 }
 void E2BAdapter::create(const CreateSpec& spec, OperationContext& ctx, Result& out) {

@@ -196,6 +196,8 @@ class Handler(BaseHTTPRequestHandler):
             if sb["state"] != "running":
                 return self.respond(409, {})
             if route == "health":
+                if sb["template"] == "mock-health-drop":
+                    return self.drop()
                 return self.respond(503 if sb["template"] == "mock-unready" else 200, {})
             if route == "filesystem.Filesystem/Stat":
                 data = json.loads(body)

@@ -17,7 +17,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 TEMPLATES = ("base", "missing", "mock-rate-limit", "mock-legacy", "mock-unready",
-             "mock-create-drop", "mock-slow-pause", "mock-delete-stuck")
+             "mock-create-drop", "mock-slow-pause", "mock-delete-stuck", "mock-health-drop")
 
 
 def check(value, message):
@@ -233,10 +233,22 @@ class Suite:
         self.call("DeleteSandbox", {"create_request_id": "not-recorded"}, "ERROR_NOT_FOUND")
         self.call("DeleteSandbox", {"create_request_id": "write-once"}, "ERROR_INVALID_ARGUMENT")
 
-        unready = self.call("CreateSandbox", {"backend": "mock", "template": "mock-unready", "timeout_ms": 250}, "ERROR_OPERATION_TIMEOUT")
+        health_before = sum(p.endswith('/health') for _, p in self.stats()["calls"])
+        unready = self.call("CreateSandbox", {"backend": "mock", "template": "mock-unready", "timeout_ms": 1000}, "ERROR_OPERATION_TIMEOUT")
         check(unready["sandbox"]["sandbox_id"] and not unready["success"], "retain cleanup handle on readiness failure")
+        check("envd readiness deadline exceeded" in unready["error"]["message"] and
+              "last_http_status=503" in unready["error"]["message"], "preserve readiness failure diagnostic")
+        health_count = sum(p.endswith('/health') for _, p in self.stats()["calls"]) - health_before
+        check(1 <= health_count <= 4, "bound unhealthy sandbox polling load")
         cleaned = self.call("DeleteSandbox", {"create_request_id": unready["meta"]["request_id"]})
         check(cleaned["cleanup_confirmed"], "cleanup failed readiness via create ID")
+        dropped_health = self.call("CreateSandbox", {"backend": "mock", "template": "mock-health-drop",
+                                                    "timeout_ms": 1000}, "ERROR_OPERATION_TIMEOUT")
+        check("last_http_status=0" in dropped_health["error"]["message"] and
+              dropped_health["error"]["backend_code"].startswith("CURL_"),
+              "distinguish HTTP rejection from health transport failure")
+        check(self.call("DeleteSandbox", {"create_request_id": dropped_health["meta"]["request_id"]})
+              ["cleanup_confirmed"], "cleanup after health transport failure")
         create_count = sum(m == "POST" and p == "/sandboxes" for m, p in self.stats()["calls"])
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             active_create = executor.submit(self.call, "CreateSandbox",
@@ -332,6 +344,7 @@ def main():
                                cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
         (artifacts / "smoke.log").write_text(smoke.stdout + smoke.stderr, encoding="utf-8")
         check(smoke.returncode == 0, "smoke driver failed against Mock: " + smoke.stdout + smoke.stderr)
+        check("Cleanup confirmed: true" in smoke.stdout, "smoke driver prints cleanup result")
         report["smoke_driver_passed"] = True
         report["passed"] = True
     except Exception:

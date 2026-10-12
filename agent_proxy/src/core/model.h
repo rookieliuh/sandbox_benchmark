@@ -128,6 +128,13 @@ struct OperationContext {
   Clock::time_point start, deadline;
   std::function<bool()> cancelled = [] { return false; };
   Timing timing;
+  // Bounded diagnostic summary; never retain URLs, headers, tokens or response bodies.
+  struct EnvdHealth {
+    uint32_t attempts = 0;
+    int last_http_status = 0;
+    std::string last_transport_code;
+    std::map<std::string, uint32_t> http_counts;
+  } envd_health;
   Outcome outcome = Outcome::NotStarted;
   // Before an operation request can reach the backend, and after HTTP acknowledgement.
   std::function<void(bool)> on_dispatch = [](bool) {};

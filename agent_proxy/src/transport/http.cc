@@ -185,10 +185,12 @@ HttpResponse HttpClient::perform(const HttpRequest& req, OperationContext& ctx) 
     auto mapped =
         code == CURLE_OPERATION_TIMEDOUT ? Code::DeadlineExceeded : Code::BackendUnavailable;
     // Do not copy curl error text: URLs, tokens or backend content can appear in diagnostics.
-    throw Error(
+    Error error(
         mapped,
         code == CURLE_OPERATION_TIMEDOUT ? "backend request timed out" : "backend transport failed",
         req.source, req.resource);
+    error.backend_code = "CURL_" + std::to_string(static_cast<int>(code));
+    throw error;
   }
   long status = 0;
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
