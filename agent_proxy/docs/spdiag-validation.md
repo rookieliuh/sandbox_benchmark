@@ -131,6 +131,58 @@ SpDiag validation exit: 0
 
 ## 后续单独重跑采集验证
 
+### 独立 SDK 的 1 秒 / 5 秒最小复现
+
+若需排除代理计时、bRPC 和异步回调的影响，运行独立项目
+`tests/spdiag_minimal`。它不链接任何 Agent Proxy 代码，也不需要 bRPC、Protobuf、
+Mock 或 E2B；仅链接已核验 RPM 的 `SpDiag::spdiag_lib`。
+
+| PerfKey | Program | 文件/函数 | 级别 | Start/End 范围 | 结果口径 | 线程 |
+|---|---|---|---|---|---|---|
+| SLEEP_1S | spdiag-minimal | main.cc::measure | SUB_SYSTEM | sleep_for(1000ms) | 正常 End(0)，异常 End(-1) | global_perf，同线程 |
+| SLEEP_5S | spdiag-minimal | main.cc::measure | SUB_SYSTEM | sleep_for(5000ms) | 正常 End(0)，异常 End(-1) | global_perf，同线程 |
+
+两个点依次执行，各一次；没有父子嵌套、批量操作或跨线程 handoff。
+独立 `steady_clock` 包住 Start/sleep/End，以实际等待时长核对 SDK 的
+Total/Avg/Min/Max（容差 10%）。每行必须 Ticks=1、Good=1、Bad=0、Not=0。
+SDK 对象构造和计时器初始化在参考计时之前，正常退出前显式 Shutdown 刷新。
+
+在本地提交推送且服务器更新后执行（复用已准备的 `.deps/spdiag`，无需再安装 RPM）：
+
+```bash
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  mkdir -p validation-logs
+  ap_log="validation-logs/spdiag-minimal-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  set +e
+  nice -n 10 python3 -u -B scripts/check_spdiag_minimal.py 2>&1 | tee "$ap_log"
+  ap_rc=${PIPESTATUS[0]}
+  printf '\nSDK-only test exit: %s\nFull log: %s\n' "$ap_rc" "$ap_log"
+  exit "$ap_rc"
+)
+```
+
+脚本核验原 RPM 清单与解包文件 SHA256，使用全新的项目内目录单并行构建，
+并从 `/proc/self/maps` 核实实际加载的 SDK 路径和摘要。SDK 路径只对脚本子进程生效。
+CLI 使用专属工作目录的 `spdiag.conf`，创建随机 `/spdiag_minimal_<uid>_<uuid>` 共享内存，
+正常结束、计时失败或常规中断时只清理本次共享内存。没有网络监听或服务管理命令，
+不会执行 RPM 安装、修改 `/usr`/`/etc`、重启已有服务或调用默认 SpDiag 会话。
+测试仍会短暂占用编译资源和少量共享内存，sleep 合计至少 6 秒。
+如进程被 SIGKILL 或机器掉电，无法保证执行清理；不要使用通配符清理共享内存。
+
+请粘贴完整终端输出，尤其是两条 `SAMPLE`、SDK 映射路径、SpDiag 两行统计、
+两行比较结果和 `cleanup_confirmed`。更详细信息保留在打印的
+`test-results/spdiag-minimal-*/report.json`、`probe.log`、`show.log` 和 `stop.log`；
+构建失败则看 `configure.log` / `build.log`，脚本会把失败命令的输出打印到终端。
+
+若 1 秒通过、5 秒明显少计，说明同一个 RPM 在脱离代理后仍能复现问题；
+这支持长区间换算/统计异常，需要结合 RPM 实现定位，不能仅凭这一现象断言具体溢出代码。
+若都通过，再回到代理的跨线程集成和累积刷新行为排查。
+
+### 六个 RPC 的完整采集验证
+
 ```bash
 (
   set -euo pipefail

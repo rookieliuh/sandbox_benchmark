@@ -1,0 +1,2 @@
+PERF_KEY_DEF(SLEEP_1S, "main.cc::measure", "Sleep1s")
+PERF_KEY_DEF(SLEEP_5S, "main.cc::measure", "Sleep5s")
