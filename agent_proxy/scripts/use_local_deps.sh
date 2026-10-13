@@ -8,3 +8,9 @@ if [[ -d "$AP_LOCAL_PREFIX" ]]; then
   export PKG_CONFIG_PATH="$AP_LOCAL_PREFIX/lib/pkgconfig:$AP_LOCAL_PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
   export LD_LIBRARY_PATH="$AP_LOCAL_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
+AP_SPDIAG_PREFIX="$AP_PROJECT_DIR/.deps/spdiag/usr"
+if [[ -f "$AP_SPDIAG_PREFIX/lib64/cmake/SpDiag/SpDiagConfig.cmake" ]]; then
+  export CMAKE_PREFIX_PATH="$AP_SPDIAG_PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+  export SpDiag_DIR="$AP_SPDIAG_PREFIX/lib64/cmake/SpDiag"
+  export LD_LIBRARY_PATH="$AP_SPDIAG_PREFIX/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi

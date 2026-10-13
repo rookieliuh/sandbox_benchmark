@@ -92,7 +92,8 @@ class Suite:
             json.loads(result["result_json"])
         with self.lock:
             self.records.append({"name": name, "method": method, "expected": expected,
-                                 "status": code, "rpc_wall_ms": (time.monotonic()-start)*1000})
+                                 "status": code, "rpc_wall_ms": (time.monotonic()-start)*1000,
+                                 "proxy_elapsed_ms": int(result["meta"]["proxy_elapsed"]["value_ms"])})
         return result
 
     def create(self, template="base", **kwargs):
@@ -310,6 +311,8 @@ def main():
     parser.add_argument("--proxy", required=True, type=Path)
     parser.add_argument("--client", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--spdiag-shm-name", default="",
+                        help="Instrument only the main test proxy in a pre-created dedicated SHM")
     args = parser.parse_args()
     check(args.proxy.is_file() and args.client.is_file(), "compile both C++ binaries first")
     args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -339,8 +342,20 @@ def main():
     try:
         start([sys.executable, str(ROOT / "tests/mock_backend/server.py"), "--port", str(mock_port)], "mock", mock_port)
         start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{proxy_port}", f"--backends={config_path}",
-               "--control_threads=2", "--step_threads=2"], "proxy", proxy_port)
+               "--control_threads=2", "--step_threads=2",
+               f"--spdiag_shm_name={args.spdiag_shm_name}"], "proxy", proxy_port)
         suite.run()
+        if args.spdiag_shm_name:
+            # A long interval catches SDK tick-to-nanosecond overflow that counter-only
+            # tests cannot find. Keep this out of the ordinary fast CTest workload.
+            long_sid, _ = suite.create()
+            try:
+                measured = suite.step(long_sid, "bash", {"command": "mock:sleep:5000"})
+                check(int(measured["meta"]["proxy_elapsed"]["value_ms"]) >= 4900,
+                      "long PerfPoint validation workload did not wait for five seconds")
+            finally:
+                suite.call("DeleteSandbox", {"sandbox_id": long_sid})
+        report["perf_cases"] = list(suite.records)  # Other instances below do not collect.
         # Independent instance: record exhaustion must reject before creating any sandbox.
         capacity_port = unused_port()
         start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{capacity_port}", f"--backends={config_path}",

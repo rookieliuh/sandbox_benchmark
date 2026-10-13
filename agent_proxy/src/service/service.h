@@ -3,6 +3,7 @@
 #include "agent_proxy.pb.h"
 #include "config/config.h"
 #include "core/executor.h"
+#include "observability/rpc_perf.h"
 namespace ap {
 namespace pb = benchmark::agent::v1;
 class Service final : public pb::AgentProxyService {
@@ -43,7 +44,7 @@ class Service final : public pb::AgentProxyService {
   using Operation = std::function<void(OperationContext&, WorkResult&)>;
   template <class Request, class Response>
   void dispatch(google::protobuf::RpcController*, const Request*, Response*,
-                google::protobuf::Closure*, pb::OperationKind, bool step, uint32_t timeout_ms,
+                google::protobuf::Closure*, RpcPerfKind, pb::OperationKind, bool step, uint32_t timeout_ms,
                 uint32_t max_ms, Operation);
   template <class Response>
   void finish(OperationContext&, const pb::RequestMeta&, Response*, WorkResult&,

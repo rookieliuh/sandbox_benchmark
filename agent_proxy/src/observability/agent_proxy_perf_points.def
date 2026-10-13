@@ -1,0 +1,7 @@
+// API-level intervals: dispatch entry through response construction and lease release.
+PERF_KEY_DEF(AGENT_PROXY_CREATE_SANDBOX_FULL, "service.cc::CreateSandbox", "CreateSandbox")
+PERF_KEY_DEF(AGENT_PROXY_RUN_STEP_FULL, "service.cc::RunStep", "RunStep")
+PERF_KEY_DEF(AGENT_PROXY_PAUSE_SANDBOX_FULL, "service.cc::PauseSandbox", "PauseSandbox")
+PERF_KEY_DEF(AGENT_PROXY_RESUME_SANDBOX_FULL, "service.cc::ResumeSandbox", "ResumeSandbox")
+PERF_KEY_DEF(AGENT_PROXY_DELETE_SANDBOX_FULL, "service.cc::DeleteSandbox", "DeleteSandbox")
+PERF_KEY_DEF(AGENT_PROXY_GET_STATUS_FULL, "service.cc::GetStatus", "GetStatus")

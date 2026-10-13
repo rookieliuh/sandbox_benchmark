@@ -12,8 +12,12 @@ C++17 / bRPC 服务，提供 CreateSandbox、RunStep、PauseSandbox、ResumeSand
 - [Linux 构建与日志](docs/linux-validation.md)。
 - [真实 E2B 验证步骤](docs/e2b-validation.md)。
 - [验证记录](docs/validation.md)：区分旧版本已通过的服务器测试和本次迁移待验证项。
+- [SpDiag 六接口打点、项目内依赖和隔离验证](docs/spdiag-validation.md)。
 
 ## 在已有 Linux 服务器上更新
+
+当前版本新增 SpDiag SDK 构建依赖。首次使用先按 [SpDiag 验证文档](docs/spdiag-validation.md)
+在项目内准备两个 RPM；推荐使用其中的独立 `build-spdiag` 构建命令。
 
 ```bash
 (
@@ -32,7 +36,7 @@ C++17 / bRPC 服务，提供 CreateSandbox、RunStep、PauseSandbox、ResumeSand
 
 首次构建需要 Linux、GCC/C++17、CMake >=3.20、Python >=3.10、Protobuf（含 protoc 和 libprotoc 开发文件）、libcurl、OpenSSL、zlib、gflags、LevelDB、nlohmann/json >=3.9；脚本会按需在 `.deps` 内编译安装 bRPC 1.12.1。现有服务器使用 Protobuf 3.14.0、LevelDB 1.23、nlohmann/json 3.11.3。
 
-CTest 保留三组：`core`、`mock-protocol`、`e2e`。e2e 启动真实 C++ Client/Proxy 和 Python Mock；还用 Mock 验证真实 E2B 冒烟脚本本身，不会连接真实 E2B。报告为 `build/test-results/e2e.json`。
+CTest 包含四组：`core`、`mock-protocol`、`spdiag-tools`、`e2e`。e2e 启动真实 C++ Client/Proxy 和 Python Mock；还用 Mock 验证真实 E2B 冒烟脚本本身，不会连接真实 E2B。报告为构建目录下的 `test-results/e2e.json`。真实 SpDiag 计数验证由 `scripts/validate_spdiag.py` 单独运行。
 
 ## 手动运行
 

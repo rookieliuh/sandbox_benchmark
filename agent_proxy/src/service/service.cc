@@ -274,115 +274,130 @@ void Service::finish(OperationContext& ctx, const pb::RequestMeta& meta, Respons
 
 template <class Request, class Response>
 void Service::dispatch(google::protobuf::RpcController* controller, const Request* req,
-                       Response* resp, google::protobuf::Closure* done, pb::OperationKind kind,
-                       bool step, uint32_t timeout_ms, uint32_t max_ms, Operation operation) {
+                       Response* resp, google::protobuf::Closure* done, RpcPerfKind perf_kind,
+                       pb::OperationKind kind, bool step, uint32_t timeout_ms, uint32_t max_ms,
+                       Operation operation) {
   brpc::ClosureGuard guard(done);
-  auto ctx = std::make_shared<OperationContext>();
-  ctx->start = Clock::now();
-  ctx->deadline = ctx->start + std::chrono::milliseconds(timeout_ms);
   auto* cntl = static_cast<brpc::Controller*>(controller);
-  ctx->cancelled = [cntl] { return cntl->IsCanceled(); };
-  auto out = std::make_shared<WorkResult>();
-  std::shared_ptr<Entry> entry;
-  auto complete = [this, ctx, out, req, resp, cntl](const std::optional<Error>& error,
-                                                    const std::shared_ptr<Entry>& e) {
-    try {
-      finish(*ctx, req->meta(), resp, *out, error, e);
-    } catch (...) {
-      // Preserve uncertainty and prevent a partially constructed response being replayed.
-      if (e) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        e->record.mutable_info()->set_state(pb::OPERATION_UNKNOWN);
-        e->record.clear_final_response();
-      }
-      cntl->SetFailed("response construction failed; query operation status");
-    }
-    out->lease.reset();
-  };
+  std::shared_ptr<RpcPerf> perf;
+  // Include context allocation and setup in the failure boundary as well as the interval.
   try {
-    validate_meta(req->meta());
-    if (req->ByteSizeLong() > kRpcLimit)
-      throw Error(Code::PayloadTooLarge, "RPC request too large");
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto it = records_.find(req->meta().request_id());
-      if (it != records_.end()) {
-        if (it->second->fingerprint != fingerprint(*req))
-          throw Error(Code::RequestIdConflict,
-                      "request ID is already bound to a different request");
-        throw Error(Code::DuplicateRequest,
-                    "request already recorded; query GetStatus with a new ID");
-      }
-      if (kind != pb::OPERATION_KIND_UNSPECIFIED) {
-        if (records_.size() >= max_records_ || record_bytes_ > max_record_bytes_ ||
-            kReservation > max_record_bytes_ - record_bytes_)
-          throw Error(Code::StorageUnavailable,
-                      "operation record capacity exhausted; request not dispatched");
-        entry = std::make_shared<Entry>();
-        entry->fingerprint = fingerprint(*req);
-        entry->bytes = kReservation;
-        *entry->record.mutable_original_meta() = req->meta();
-        auto* op = entry->record.mutable_info();
-        op->set_request_id(req->meta().request_id());
-        op->set_kind(kind);
-        op->set_state(pb::OPERATION_ACCEPTED);
-        op->set_dispatch_state(pb::DISPATCH_NOT_STARTED);
-        op->set_observed_at_unix_ms(now_ms());
-        if constexpr (std::is_same_v<Request, pb::DeleteSandboxRequest>)
-          op->set_target_create_request_id(req->create_request_id());
-        records_.emplace(req->meta().request_id(), entry);
-        record_bytes_ += entry->bytes;
-      }
-    }
-    if (timeout_ms == 0 || timeout_ms > max_ms)
-      throw Error(Code::InvalidArgument, "timeout_ms outside RPC limit");
-    ctx->on_dispatch = [this, entry, out](bool acknowledged) {
-      if (!entry)
-        return;
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto* info = entry->record.mutable_info();
-      info->set_sandbox_id(out->sandbox_id);
-      if (acknowledged || info->dispatch_state() != pb::DISPATCH_STARTED)
-        info->set_dispatch_state(acknowledged ? pb::DISPATCH_STARTED
-                                              : pb::DISPATCH_MAY_HAVE_STARTED);
-      info->set_observed_at_unix_ms(now_ms());
-    };
-    auto work = [this, ctx, out, entry, complete, operation = std::move(operation),
-                 done]() mutable {
-      brpc::ClosureGuard completion(done);
-      std::optional<Error> error;
-      ctx->timing.queue_us = micros(ctx->start, Clock::now());
+    perf = start_rpc_perf(perf_kind);
+    RpcPerfCompletion perf_completion(perf);
+    auto ctx = std::make_shared<OperationContext>();
+    ctx->start = Clock::now();
+    ctx->deadline = ctx->start + std::chrono::milliseconds(timeout_ms);
+    ctx->cancelled = [cntl] { return cntl->IsCanceled(); };
+    auto out = std::make_shared<WorkResult>();
+    std::shared_ptr<Entry> entry;
+    auto complete = [this, ctx, out, req, resp, cntl, perf](const std::optional<Error>& error,
+                                                            const std::shared_ptr<Entry>& e) {
       try {
-        ctx->check();
-        if (entry) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          entry->record.mutable_info()->set_state(pb::OPERATION_RUNNING);
-          entry->record.mutable_info()->set_observed_at_unix_ms(now_ms());
-        }
-        operation(*ctx, *out);
-      } catch (const Error& e) {
-        error = e;
-      } catch (const Json::exception&) {
-        error = Error(Code::BackendProtocolError, "invalid backend field type");
+        finish(*ctx, req->meta(), resp, *out, error, e);
       } catch (...) {
-        error = Error(Code::InternalError, "internal operation failure");
+        // Preserve uncertainty and prevent a partially constructed response being replayed.
+        if (e) {
+          std::lock_guard<std::mutex> lock(mutex_);
+          e->record.mutable_info()->set_state(pb::OPERATION_UNKNOWN);
+          e->record.clear_final_response();
+        }
+        cntl->SetFailed("response construction failed; query operation status");
       }
-      complete(error, entry);
+      out->lease.reset();
+      // Both dispatch-thread rejection and worker/expiry-thread completion end here.
+      // Stop before done runs: bRPC wire serialization and transmission are outside this interval.
+      end_rpc_perf(perf, cntl->Failed() ? pb::ERROR_INTERNAL : resp->error().code());
     };
-    if (!(step ? step_pool_ : control_pool_).submit(std::move(work), ctx->deadline))
-      throw Error(Code::ResourceExhausted, "proxy work queue is full");
-    guard.release();
-  } catch (const Error& e) {
-    complete(e, entry);
+    try {
+      validate_meta(req->meta());
+      if (req->ByteSizeLong() > kRpcLimit)
+        throw Error(Code::PayloadTooLarge, "RPC request too large");
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = records_.find(req->meta().request_id());
+        if (it != records_.end()) {
+          if (it->second->fingerprint != fingerprint(*req))
+            throw Error(Code::RequestIdConflict,
+                        "request ID is already bound to a different request");
+          throw Error(Code::DuplicateRequest,
+                      "request already recorded; query GetStatus with a new ID");
+        }
+        if (kind != pb::OPERATION_KIND_UNSPECIFIED) {
+          if (records_.size() >= max_records_ || record_bytes_ > max_record_bytes_ ||
+              kReservation > max_record_bytes_ - record_bytes_)
+            throw Error(Code::StorageUnavailable,
+                        "operation record capacity exhausted; request not dispatched");
+          entry = std::make_shared<Entry>();
+          entry->fingerprint = fingerprint(*req);
+          entry->bytes = kReservation;
+          *entry->record.mutable_original_meta() = req->meta();
+          auto* op = entry->record.mutable_info();
+          op->set_request_id(req->meta().request_id());
+          op->set_kind(kind);
+          op->set_state(pb::OPERATION_ACCEPTED);
+          op->set_dispatch_state(pb::DISPATCH_NOT_STARTED);
+          op->set_observed_at_unix_ms(now_ms());
+          if constexpr (std::is_same_v<Request, pb::DeleteSandboxRequest>)
+            op->set_target_create_request_id(req->create_request_id());
+          records_.emplace(req->meta().request_id(), entry);
+          record_bytes_ += entry->bytes;
+        }
+      }
+      if (timeout_ms == 0 || timeout_ms > max_ms)
+        throw Error(Code::InvalidArgument, "timeout_ms outside RPC limit");
+      ctx->on_dispatch = [this, entry, out](bool acknowledged) {
+        if (!entry)
+          return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto* info = entry->record.mutable_info();
+        info->set_sandbox_id(out->sandbox_id);
+        if (acknowledged || info->dispatch_state() != pb::DISPATCH_STARTED)
+          info->set_dispatch_state(acknowledged ? pb::DISPATCH_STARTED
+                                                : pb::DISPATCH_MAY_HAVE_STARTED);
+        info->set_observed_at_unix_ms(now_ms());
+      };
+      auto work = [this, ctx, out, entry, complete, perf, operation = std::move(operation),
+                   done]() mutable {
+        brpc::ClosureGuard completion(done);
+        RpcPerfCompletion perf_completion(perf);
+        std::optional<Error> error;
+        ctx->timing.queue_us = micros(ctx->start, Clock::now());
+        try {
+          ctx->check();
+          if (entry) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            entry->record.mutable_info()->set_state(pb::OPERATION_RUNNING);
+            entry->record.mutable_info()->set_observed_at_unix_ms(now_ms());
+          }
+          operation(*ctx, *out);
+        } catch (const Error& e) {
+          error = e;
+        } catch (const Json::exception&) {
+          error = Error(Code::BackendProtocolError, "invalid backend field type");
+        } catch (...) {
+          error = Error(Code::InternalError, "internal operation failure");
+        }
+        complete(error, entry);
+      };
+      if (!(step ? step_pool_ : control_pool_).submit(std::move(work), ctx->deadline))
+        throw Error(Code::ResourceExhausted, "proxy work queue is full");
+      guard.release();
+      perf_completion.release();
+    } catch (const Error& e) {
+      complete(e, entry);
+    } catch (...) {
+      complete(Error(Code::InternalError, "request dispatch failed"), entry);
+    }
   } catch (...) {
-    complete(Error(Code::InternalError, "request dispatch failed"), entry);
+    end_rpc_perf(perf, pb::ERROR_INTERNAL);
+    cntl->SetFailed("request context initialization failed");
   }
 }
 
 void Service::CreateSandbox(google::protobuf::RpcController* c, const pb::CreateSandboxRequest* q,
                             pb::CreateSandboxResponse* r, google::protobuf::Closure* d) {
   dispatch(
-      c, q, r, d, pb::OPERATION_CREATE, false, q->timeout_ms(), 300000,
+      c, q, r, d, RpcPerfKind::CreateSandbox, pb::OPERATION_CREATE, false, q->timeout_ms(), 300000,
       [this, q](auto& ctx, auto& out) {
         validate_identifier(q->backend(), "backend");
         validate_identifier(q->template_(), "template");
@@ -423,8 +438,8 @@ void Service::RunStep(google::protobuf::RpcController* c, const pb::RunStepReque
   const bool bash = q->tool() == "bash";
   // Bash receives preflight and cleanup allowance in addition to the tool's execution budget.
   const uint32_t budget = q->timeout_ms() > 900000 ? 0 : q->timeout_ms() + (bash ? 7000 : 0);
-  dispatch(c, q, r, d, pb::OPERATION_RUN_STEP, true, budget, bash ? 907000 : 120000,
-           [this, q, bash](auto& ctx, auto& out) {
+  dispatch(c, q, r, d, RpcPerfKind::RunStep, pb::OPERATION_RUN_STEP, true, budget,
+           bash ? 907000 : 120000, [this, q, bash](auto& ctx, auto& out) {
              if (!q->step_id() || !q->timeout_ms())
                throw Error(Code::InvalidArgument, "positive step_id and timeout_ms required");
              if (q->tool() != "bash" && q->tool() != "read" && q->tool() != "write" &&
@@ -442,8 +457,8 @@ void Service::RunStep(google::protobuf::RpcController* c, const pb::RunStepReque
 }
 void Service::PauseSandbox(google::protobuf::RpcController* c, const pb::PauseSandboxRequest* q,
                            pb::PauseSandboxResponse* r, google::protobuf::Closure* d) {
-  dispatch(c, q, r, d, pb::OPERATION_PAUSE, false, q->timeout_ms(), 300000,
-           [this, q](auto& ctx, auto& out) {
+  dispatch(c, q, r, d, RpcPerfKind::PauseSandbox, pb::OPERATION_PAUSE, false, q->timeout_ms(),
+           300000, [this, q](auto& ctx, auto& out) {
              auto b = lookup(q->sandbox_id());
              out.sandbox_id = q->sandbox_id();
              acquire(out, out.sandbox_id);
@@ -454,8 +469,8 @@ void Service::PauseSandbox(google::protobuf::RpcController* c, const pb::PauseSa
 }
 void Service::ResumeSandbox(google::protobuf::RpcController* c, const pb::ResumeSandboxRequest* q,
                             pb::ResumeSandboxResponse* r, google::protobuf::Closure* d) {
-  dispatch(c, q, r, d, pb::OPERATION_RESUME, false, q->timeout_ms(), 300000,
-           [this, q](auto& ctx, auto& out) {
+  dispatch(c, q, r, d, RpcPerfKind::ResumeSandbox, pb::OPERATION_RESUME, false, q->timeout_ms(),
+           300000, [this, q](auto& ctx, auto& out) {
              auto b = lookup(q->sandbox_id());
              out.sandbox_id = q->sandbox_id();
              acquire(out, out.sandbox_id);
@@ -467,8 +482,8 @@ void Service::ResumeSandbox(google::protobuf::RpcController* c, const pb::Resume
 }
 void Service::DeleteSandbox(google::protobuf::RpcController* c, const pb::DeleteSandboxRequest* q,
                             pb::DeleteSandboxResponse* r, google::protobuf::Closure* d) {
-  dispatch(c, q, r, d, pb::OPERATION_DELETE, false, q->timeout_ms(), 120000,
-           [this, q](auto& ctx, auto& out) {
+  dispatch(c, q, r, d, RpcPerfKind::DeleteSandbox, pb::OPERATION_DELETE, false, q->timeout_ms(),
+           120000, [this, q](auto& ctx, auto& out) {
              std::string id;
              if (q->target_case() == pb::DeleteSandboxRequest::kSandboxId)
                id = q->sandbox_id();
@@ -514,7 +529,7 @@ void Service::DeleteSandbox(google::protobuf::RpcController* c, const pb::Delete
 }
 void Service::GetStatus(google::protobuf::RpcController* c, const pb::GetStatusRequest* q,
                         pb::GetStatusResponse* r, google::protobuf::Closure* d) {
-  dispatch(c, q, r, d, pb::OPERATION_KIND_UNSPECIFIED, false, 10000, 10000,
+  dispatch(c, q, r, d, RpcPerfKind::GetStatus, pb::OPERATION_KIND_UNSPECIFIED, false, 10000, 10000,
            [this, q, r](auto& ctx, auto& out) {
              if (q->target_case() == pb::GetStatusRequest::kOperationRequestId) {
                validate_identifier(q->operation_request_id(), "operation_request_id");

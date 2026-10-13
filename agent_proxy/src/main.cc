@@ -15,6 +15,7 @@ DEFINE_int32(queue_size, 128, "Maximum waiting requests per worker pool");
 DEFINE_int32(max_records, 10000, "Maximum operation records retained until restart");
 DEFINE_int32(record_memory_mib, 256, "Operation record budget including in-flight reservations");
 DEFINE_int32(admin_port, 0, "Optional bRPC internal services port; 0 disables builtins");
+DEFINE_string(spdiag_shm_name, "", "Dedicated /agent_proxy_* SpDiag SHM; empty disables collection");
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   if (FLAGS_control_threads <= 0 || FLAGS_step_threads <= 0 || FLAGS_queue_size <= 0 ||
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
   int result = 0;
   try {
     auto configs = ap::load_backends(FLAGS_backends);
+    ap::initialize_rpc_perf(FLAGS_spdiag_shm_name);
     ap::Service service(configs, FLAGS_control_threads, FLAGS_step_threads, FLAGS_queue_size,
                         FLAGS_max_records,
                         static_cast<size_t>(FLAGS_record_memory_mib) * 1024 * 1024);
@@ -48,6 +50,7 @@ int main(int argc, char** argv) {
     std::cerr << "startup/shutdown failed; check configuration, dependencies and listen address\n";
     result = 1;
   }
+  ap::shutdown_rpc_perf();  // Service and worker pools have been destroyed; flush completed samples.
   curl_global_cleanup();
   return result;
 }
