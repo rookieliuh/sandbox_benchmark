@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import signal
 import subprocess
 import sys
 import time
@@ -26,12 +27,21 @@ def main():
     parser.add_argument('--cpu', type=int, required=True)
     parser.add_argument('--memory-mib', type=int, required=True)
     parser.add_argument('--ttl', type=int, default=300)
+    parser.add_argument('--basic-lifecycle', action='store_true',
+                        help='Six normal RPCs only: bash printf, no file-tool tests or injected delays')
+    parser.add_argument('--spdiag-shm-name', default='', help='Existing private /agent_proxy_* SHM')
+    parser.add_argument('--report', type=Path, help='Write sanitized RPC timing and cleanup results')
     parser.add_argument('--allow-create', action='store_true', help='Authorize one test sandbox and lifecycle operations')
     args = parser.parse_args()
     if not args.allow_create:
         parser.error('--allow-create is required: this test creates, pauses, resumes and deletes one sandbox')
     if min(args.cpu, args.memory_mib, args.ttl) <= 0:
         parser.error('CPU, memory and TTL must be positive')
+    if args.spdiag_shm_name and (not args.spdiag_shm_name.startswith('/agent_proxy_') or
+                               '/' in args.spdiag_shm_name[1:]):
+        parser.error('SpDiag requires an existing private /agent_proxy_* name')
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
     # Validate paths before starting a service. Do not change any existing deployment.
     for path in (args.proxy, args.client, args.backends):
         if not path.is_file():
@@ -48,6 +58,8 @@ def main():
     success = False
     cleaned = False
     sid = ''
+    records = []
+    proxy_exit = {'returncode': None, 'forced_kill': False, 'normal_exit': False}
     env = os.environ.copy()
     for name in ('NO_PROXY', 'no_proxy'):
         env[name] = '127.0.0.1,localhost' + (',' + env[name] if env.get(name) else '')
@@ -64,6 +76,7 @@ def main():
             body.setdefault('timeout_ms', 60000)
         if method == 'RunStep':
             body.setdefault('step_id', sequence)
+        started = time.monotonic()
         result = subprocess.run([str(args.client.resolve()), f'--server=127.0.0.1:{port}',
                                  f'--method={method}', '--request=-'], input=json.dumps(body),
                                 text=True, encoding='utf-8', capture_output=True, timeout=75, env=env)
@@ -71,8 +84,12 @@ def main():
             raise RuntimeError(f'{method}: client transport/local failure, exit={result.returncode}')
         response = json.loads(result.stdout)
         code = response.get('error', {}).get('code')
+        elapsed = int(response['meta']['proxy_elapsed']['value_ms'])
+        records.append({'method': method, 'status': code, 'proxy_elapsed_ms': elapsed,
+                        'rpc_wall_ms': (time.monotonic() - started) * 1000,
+                        'request_id': body['meta']['request_id']})
         label = f'RunStep[{body["tool"]}]' if method == 'RunStep' else method
-        print(f'{label}: {code}', flush=True)
+        print(f'{label}: {code}; proxy_elapsed_ms={elapsed}', flush=True)
         if code != 'ERROR_OK':
             detail = response.get('error', {})
             # These are sanitized Proxy errors, never the raw backend response or config.
@@ -91,7 +108,9 @@ def main():
         with log_path.open('w', encoding='utf-8') as log:
             process = subprocess.Popen([str(args.proxy.resolve()), f'--listen=127.0.0.1:{port}',
                                         f'--backends={args.backends.resolve()}',
-                                        '--control_threads=2', '--step_threads=2'],
+                                        '--control_threads=2', '--step_threads=2',
+                                        '--graceful_quit_on_sigterm=true',
+                                        f'--spdiag_shm_name={args.spdiag_shm_name}'],
                                        stdout=log, stderr=subprocess.STDOUT, env=env)
             deadline = time.monotonic() + 15
             while True:
@@ -116,24 +135,26 @@ def main():
             result = step('bash', {'command': 'printf hello'})
             if result['stdout'] != 'hello' or result['exit_code'] != 0:
                 raise RuntimeError('Command output mismatch')
-            path = '/tmp/' + run + '.txt'
-            step('write', {'path': path, 'content': 'agent proxy smoke'})
-            if step('read', {'path': path})['content'] != 'agent proxy smoke':
-                raise RuntimeError('Initial file write/read mismatch')
-            step('edit', {'path': path, 'oldString': 'proxy', 'newString': 'benchmark'})
-            if step('read', {'path': path})['content'] != 'agent benchmark smoke':
-                raise RuntimeError('File roundtrip mismatch')
+            if not args.basic_lifecycle:
+                path = '/tmp/' + run + '.txt'
+                step('write', {'path': path, 'content': 'agent proxy smoke'})
+                if step('read', {'path': path})['content'] != 'agent proxy smoke':
+                    raise RuntimeError('Initial file write/read mismatch')
+                step('edit', {'path': path, 'oldString': 'proxy', 'newString': 'benchmark'})
+                if step('read', {'path': path})['content'] != 'agent benchmark smoke':
+                    raise RuntimeError('File roundtrip mismatch')
             paused = rpc('PauseSandbox', {'sandbox_id': sid})
             if paused['sandbox']['state'] != 'SANDBOX_PAUSED':
                 raise RuntimeError('Pause was not verified')
             resumed = rpc('ResumeSandbox', {'sandbox_id': sid})
             if resumed['sandbox']['state'] != 'SANDBOX_READY' or resumed['sandbox']['sandbox_id'] != sid:
                 raise RuntimeError('Resume or identity mismatch')
-            if step('read', {'path': path})['content'] != 'agent benchmark smoke':
-                raise RuntimeError('File was not preserved across pause/resume')
-            record = rpc('GetStatus', {'operation_request_id': create_id})
-            if record['operation']['info']['state'] != 'OPERATION_SUCCEEDED':
-                raise RuntimeError('Create operation record missing')
+            if not args.basic_lifecycle:
+                if step('read', {'path': path})['content'] != 'agent benchmark smoke':
+                    raise RuntimeError('File was not preserved across pause/resume')
+                record = rpc('GetStatus', {'operation_request_id': create_id})
+                if record['operation']['info']['state'] != 'OPERATION_SUCCEEDED':
+                    raise RuntimeError('Create operation record missing')
             success = True
     except (Exception, KeyboardInterrupt) as error:
         print(f'FAIL: {error}', file=sys.stderr, flush=True)
@@ -141,32 +162,44 @@ def main():
         if attempted and process is not None and process.poll() is None:
             try:
                 # A timed-out RPC may still be finishing. Never submit a second create.
-                deadline = time.monotonic() + 75
-                while True:
-                    status = rpc('GetStatus', {'operation_request_id': create_id}, require_success=False)
-                    state = status.get('operation', {}).get('info', {}).get('state')
-                    if state not in ('OPERATION_ACCEPTED', 'OPERATION_RUNNING') or time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.5)
+                if not (args.basic_lifecycle and success):
+                    deadline = time.monotonic() + 75
+                    while True:
+                        status = rpc('GetStatus', {'operation_request_id': create_id}, require_success=False)
+                        state = status.get('operation', {}).get('info', {}).get('state')
+                        if state not in ('OPERATION_ACCEPTED', 'OPERATION_RUNNING') or time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.5)
                 result = rpc('DeleteSandbox', {'create_request_id': create_id}, require_success=False)
                 cleaned = bool(result.get('success') and result.get('cleanup_confirmed'))
                 print(f'Cleanup confirmed: {str(cleaned).lower()}', flush=True)
             except (Exception, KeyboardInterrupt):
                 cleaned = False
         if process is not None:
-            process.terminate()
+            if process.poll() is None:
+                process.terminate()
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
+                proxy_exit['forced_kill'] = True
                 process.kill()
                 process.wait()
+            proxy_exit['returncode'] = process.returncode
+            proxy_exit['normal_exit'] = process.returncode == 0 and not proxy_exit['forced_kill']
+            print(f'Proxy shutdown: {proxy_exit}', flush=True)
         print(f'Run ID: {run}\nCreate request ID: {create_id}\nProxy log: {log_path}', flush=True)
         if attempted and not cleaned:
             print('CLEANUP UNCONFIRMED: retain this create request ID; ask deployment owner to locate '
                   'the sandbox by metadata.agent_proxy_request. Do not delete unrelated sandboxes.', flush=True)
-    passed = success and cleaned
+    passed = success and cleaned and proxy_exit['normal_exit']
+    if args.report:
+        args.report.write_text(json.dumps({'passed': passed, 'run_id': run, 'create_request_id': create_id,
+                               'basic_lifecycle': args.basic_lifecycle, 'perf_cases': records,
+                               'sandbox_cleanup_confirmed': cleaned, 'proxy_log': str(log_path),
+                               'process_exits': {'proxy': proxy_exit}}, indent=2), encoding='utf-8')
     if passed:
-        print('PASS: real E2B lifecycle and tools verified; cleanup confirmed by control API.')
+        scope = 'basic lifecycle and bash' if args.basic_lifecycle else 'lifecycle and tools'
+        print(f'PASS: real E2B {scope} verified; cleanup confirmed by control API.')
     elif cleaned:
         print('FAIL: smoke test failed; cleanup confirmed by control API.')
     else:
@@ -175,4 +208,8 @@ def main():
 
 
 if __name__ == '__main__':
+    def interrupted(*_):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupted)
     sys.exit(main())

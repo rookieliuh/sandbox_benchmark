@@ -89,6 +89,63 @@ python3 scripts/check_e2b.py --api-url 'https://实际控制面地址'
 
 ## 4. 用一个独立沙箱测试六个 RPC
 
+### 基础六接口 + 独立 SpDiag 会话（当前建议）
+
+先推送本地代码并在服务器更新。复用此前已验证过创建/命令执行的项目专用 `.local.json`；
+不要把示例域名或猜测的 `127.0.0.1:3002` 替换进已有配置。
+本模式按 CreateSandbox → GetStatus → RunStep（`printf hello`）→ PauseSandbox →
+ResumeSandbox → DeleteSandbox 执行，每种 RPC 正常时一次。暂不执行文件读写、编辑、
+暂停后的文件保留或内存恢复检查，也不注入错误/延时。
+
+```bash
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  source scripts/use_local_deps.sh
+  printf '已有 E2B 配置文件：\n'
+  printf '%s\n' configs/e2b*.local.json
+  read -r -p '输入之前验证过的配置路径（configs/...local.json）：' ap_e2b_config
+  test -f "$ap_e2b_config"
+
+  # 与此前 --noproxy 探测一致；只影响本次子 Shell 及其子进程。
+  export NO_PROXY='*' no_proxy='*'
+  mkdir -p validation-logs
+  ap_log="validation-logs/e2b-basic-spdiag-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  set +e
+  nice -n 10 python3 -u -B scripts/validate_spdiag.py \
+    --build-dir "$PWD/build-spdiag" \
+    --e2b-config "$ap_e2b_config" --allow-create 2>&1 | tee "$ap_log"
+  ap_rc=${PIPESTATUS[0]}
+  printf '\n真实 E2B 测试退出码：%s\n完整日志：%s\n' "$ap_rc" "$ap_log"
+  exit "$ap_rc"
+)
+```
+
+配置只有一个后端及模板时自动选中，并读取其 CPU/内存和 `api_key_env`；若有多个，
+脚本在创建资源前停止，需在命令中明确加 `--backend <配置中的名称>`、
+`--template <配置中的名称>`。它们是本地配置别名，不一定是模板 ID。
+API Key 从该环境变量读取，缺少时在终端隐藏输入，不写入配置、报告或命令行。
+已确认的模板 `9wlppnd4mfvtb6m80qlr` 规格为 1 vCPU / 1024 MiB；以此前核验且保存在
+本地配置中的规格为准，不修改服务端模板。
+
+当前命令只需要现有 `build-spdiag` 二进制和 `.deps/spdiag`，无需重新编译或安装依赖。
+会实际占用一个测试沙箱的配额，TTL 为 300 秒，并主动删除本次创建的沙箱。
+TTL 是后端超时设置，不能代替清理确认。失败时可能增加用于清理的 GetStatus 调用，
+不会重试创建或操作已有的其他沙箱。宿主系统配置、其他服务和 SpDiag 默认会话不变。
+
+终端逐步显示 `ERROR_*` 与 `proxy_elapsed_ms`。六接口功能、控制面清理确认和 SpDiag
+计数通过才打印本模式 PASS；SpDiag 耗时仅展示原始值，明确标记 **unvalidated**，
+不将已知的长区间计时问题与 E2B 功能成败混为一项。可先用代理原有 steady_clock 计时
+观察实际流程耗时。原来的 Mock 严格耗时校验保持不变。
+
+请回传每个 RPC 的状态/耗时、SpDiag 表格、`Proxy shutdown`、`Run ID`、
+`Create request ID` 和最后结果。`Real sandbox cleanup confirmed` 表示沙箱清理确认，
+末尾 `cleanup_confirmed` 表示本次 SpDiag SHM 清理确认。若沙箱清理未确认，先保留
+请求 ID 并核对本次资源，不反复执行创建。不要发送 Key、token 或整份配置。
+
+### 包含文件工具的完整验证
+
 以下会实际创建资源、执行命令、读写自己的临时文件、暂停、恢复、删除，需要测试资源配额。不要将其他人的 sandbox ID 填入脚本；脚本没有接受已有 ID 的参数。
 
 ```bash

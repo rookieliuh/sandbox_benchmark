@@ -131,6 +131,10 @@ SpDiag validation exit: 0
 
 ## 后续单独重跑采集验证
 
+真实 E2B 的六接口基础采集使用 `--e2b-config <已有配置> --allow-create`，
+完整命令和清理口径见 [真实 E2B 验证](e2b-validation.md#基础六接口--独立-spdiag-会话当前建议)。
+该模式不启动 Mock，会创建一个真实测试沙箱；SDK 耗时标记为未验证，独立展示代理计时。
+
 ### 只采集六个接口的成功操作
 
 更新代码后，可复用已编译的 `build-spdiag/agent-proxy` 和 `agent-proxy-client`，
