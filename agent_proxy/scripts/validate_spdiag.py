@@ -87,6 +87,7 @@ def run_e2e(command, session, env):
         try:
             code = child.wait(timeout=180)
             if code:
+                print((session / "e2e.log").read_text(encoding="utf-8", errors="replace"), flush=True)
                 raise RuntimeError(f"E2E failed (exit {code}); see {session / 'e2e.log'}")
         except BaseException:
             if child.poll() is None:
@@ -184,6 +185,8 @@ def main():
         e2e = json.loads((session / "e2e.json").read_text(encoding="utf-8"))
         if not e2e["passed"]:
             raise AssertionError("E2E report did not pass")
+        report["process_exits"] = e2e["process_exits"]
+        print(f"Proxy shutdown: {report['process_exits']['proxy']}", flush=True)
         report["counters"] = verify_counts(csv_files[0], e2e["perf_cases"], success_only=args.success_only)
         report["counter_check_passed"] = True
         verify_durations(csv_files[0], e2e["perf_cases"], require_long_sample=not args.success_only)

@@ -2,15 +2,47 @@
 import json
 from pathlib import Path
 import sys
+import subprocess
 import unittest
 from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
-from e2e import Suite
+from e2e import Suite, stop_child
 
 
 class SuccessOnlyTest(unittest.TestCase):
+    def test_normal_shutdown_is_recorded(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        self.assertEqual(stop_child(process),
+                         {"returncode": 0, "forced_kill": False, "normal_exit": True})
+        process.terminate.assert_called_once_with()
+        process.kill.assert_not_called()
+
+    def test_sigterm_exit_is_not_treated_as_normal_flush(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.return_value = -15
+        self.assertFalse(stop_child(process)["normal_exit"])
+
+    def test_forced_kill_is_recorded_as_abnormal(self):
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired("proxy", 10), -9]
+        result = stop_child(process)
+        self.assertFalse(result["normal_exit"])
+        self.assertTrue(result["forced_kill"])
+        process.kill.assert_called_once_with()
+
+    def test_already_failed_child_is_not_signalled_again(self):
+        process = Mock()
+        process.poll.return_value = 1
+        process.wait.return_value = 1
+        self.assertFalse(stop_child(process)["normal_exit"])
+        process.terminate.assert_not_called()
+
     def suite(self):
         suite = Suite("unused-client", 0, 0, Path("unused-artifacts"))
         suite.call = Mock(side_effect=[

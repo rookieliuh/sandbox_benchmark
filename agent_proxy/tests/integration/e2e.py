@@ -45,6 +45,21 @@ def wait_port(port, process):
     raise TimeoutError("child process did not listen")
 
 
+def stop_child(process):
+    """Stop only this owned child, and record whether shutdown needed a forced kill."""
+    forced = False
+    if process.poll() is None:
+        process.terminate()
+    try:
+        code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        forced = True
+        process.kill()
+        code = process.wait()
+    return {"returncode": code, "forced_kill": forced,
+            "normal_exit": code == 0 and not forced}
+
+
 class Suite:
     def __init__(self, client, port, mock_port, artifacts):
         self.client, self.port, self.mock_port = str(client), port, mock_port
@@ -351,11 +366,15 @@ def main():
     report = {"passed": False, "artifacts": str(artifacts.resolve()), "success_only": args.success_only}
     env = dict(os.environ, MOCK_E2B_API_KEY="mock-key", NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
 
-    def start(command, name, port):
+    def start(command, name, port, *, graceful_proxy=False):
+        if graceful_proxy:
+            # bRPC 1.12.1 defaults this to false. SIGTERM must return through main
+            # so shutdown_rpc_perf() can flush samples even before the first timer tick.
+            command = [*command, "--graceful_quit_on_sigterm=true"]
         log = (artifacts / (name + ".log")).open("w", encoding="utf-8")
         logs.append(log)
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
-        processes.append(process)
+        processes.append((name, process, graceful_proxy))
         wait_port(port, process)
         return process
 
@@ -363,7 +382,7 @@ def main():
         start([sys.executable, str(ROOT / "tests/mock_backend/server.py"), "--port", str(mock_port)], "mock", mock_port)
         start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{proxy_port}", f"--backends={config_path}",
                "--control_threads=2", "--step_threads=2",
-               f"--spdiag_shm_name={args.spdiag_shm_name}"], "proxy", proxy_port)
+               f"--spdiag_shm_name={args.spdiag_shm_name}"], "proxy", proxy_port, graceful_proxy=True)
         if args.success_only:
             suite.run_success_only()
             report["perf_cases"] = list(suite.records)
@@ -383,7 +402,7 @@ def main():
             # Independent instance: record exhaustion must reject before creating any sandbox.
             capacity_port = unused_port()
             start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{capacity_port}", f"--backends={config_path}",
-                   "--max_records=1"], "capacity", capacity_port)
+                   "--max_records=1"], "capacity", capacity_port, graceful_proxy=True)
             limited = Suite(args.client.resolve(), capacity_port, mock_port, artifacts)
             limited.sequence = 1000
             first = limited.call("CreateSandbox", {"backend": "mock", "template": "base", "timeout_ms": 0}, "ERROR_INVALID_ARGUMENT")
@@ -406,13 +425,16 @@ def main():
         report["error"] = traceback.format_exc()
         print(report["error"], file=sys.stderr)
     finally:
-        for process in reversed(processes):
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        report["process_exits"] = {}
+        for name, process, graceful_proxy in reversed(processes):
+            stopped = stop_child(process)
+            report["process_exits"][name] = stopped
+            if graceful_proxy:
+                print(f"{name} shutdown: {stopped}", flush=True)
+                if not stopped["normal_exit"]:
+                    report["passed"] = False
+                    report.setdefault("shutdown_errors", []).append(
+                        f"{name} did not exit normally; SpDiag final flush cannot be confirmed")
         for log in logs:
             log.close()
         report["cases"] = suite.records

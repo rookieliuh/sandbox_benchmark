@@ -160,6 +160,12 @@ PauseSandbox → ResumeSandbox → DeleteSandbox，各一次；只启动专属�
 5 秒样本。默认完整测试的检查保持不变，意外失败也不会改成 Good。
 每次使用新的项目内目录、随机回环端口及独立 SpDiag SHM，退出时清理本次进程和 SHM。
 
+测试代理启动时显式传入 `--graceful_quit_on_sigterm=true`。bRPC 1.12.1 默认关闭此选项，
+直接发送 SIGTERM 会跳过 main 中的 SDK Shutdown，短于首次周期刷新的流程可能得到空表。
+现在等待代理正常退出（returncode=0、forced_kill=false）后才读取采集结果，并在报告中记录
+`process_exits`；异常退出会判为失败。不通过增加 RPC sleep 或屏蔽空表校验来绕过。
+此开关只作用于本次启动的测试代理，无需重新编译，也不修改系统信号配置或已有服务。
+
 这组单样本结果用于查看正常流程的打点，不能代表真实 E2B 性能或延迟分布；通过也不表示
 已修复当前 RPM 的长区间计时问题。请粘贴 SpDiag 六行表格、最后 PASS/FAIL 和
 `cleanup_confirmed`；失败时再粘贴会话目录中的 `report.json` 与 `e2e.log`。
