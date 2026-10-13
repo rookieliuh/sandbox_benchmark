@@ -30,6 +30,8 @@ class RealBasicFlowTest(unittest.TestCase):
         self.calls = []
         self.files = {}
         self.fail_method = None
+        self.corrupt_after_resume = False
+        self.ignore_edit = False
         self.process = Mock()
         self.process.poll.return_value = None
         self.process.returncode = 0
@@ -56,9 +58,12 @@ class RealBasicFlowTest(unittest.TestCase):
             elif tool == "write":
                 self.files[args["path"]] = args["content"]
             elif tool == "edit":
-                self.files[args["path"]] = self.files[args["path"]].replace(args["oldString"], args["newString"])
+                if not self.ignore_edit:
+                    self.files[args["path"]] = self.files[args["path"]].replace(args["oldString"], args["newString"])
             elif tool == "read":
                 value = {"content": self.files[args["path"]]}
+                if self.corrupt_after_resume and any(m == "ResumeSandbox" for m, _ in self.calls):
+                    value = {"content": "lost original content"}
             result["result_json"] = json.dumps(value)
         return subprocess.CompletedProcess(command, 0 if code == "ERROR_OK" else 2, json.dumps(result), "")
 
@@ -110,10 +115,33 @@ class RealBasicFlowTest(unittest.TestCase):
         self.assertFalse(report["process_exits"]["proxy"]["normal_exit"])
 
     def test_default_full_smoke_retains_file_tools(self):
-        code, _ = self.run_driver(basic=False)
+        code, report = self.run_driver(basic=False)
         self.assertEqual(code, 0)
         self.assertEqual([body["tool"] for method, body in self.calls if method == "RunStep"],
                          ["bash", "write", "read", "edit", "read", "read"])
+        self.assertEqual(report["file_checks"], {"write_read": True, "edit_read": True, "after_resume": True})
+        paths = {json.loads(body["arguments_json"])["path"] for method, body in self.calls
+                 if method == "RunStep" and body["tool"] != "bash"}
+        self.assertEqual(paths, {"/tmp/" + report["run_id"] + ".txt"})
+        self.assertEqual(len(report["perf_cases"]), 13)
+        self.assertTrue(all(body["sandbox_id"] == "own-test-id" for method, body in self.calls
+                            if method == "RunStep"))
+
+    def test_content_lost_after_resume_fails_and_cleans_own_sandbox(self):
+        self.corrupt_after_resume = True
+        code, report = self.run_driver(basic=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["file_checks"], {"write_read": True, "edit_read": True, "after_resume": False})
+        self.assertTrue(report["sandbox_cleanup_confirmed"])
+        self.assertEqual(self.calls[-1][1]["create_request_id"], report["create_request_id"])
+
+    def test_successful_edit_response_with_wrong_contents_fails(self):
+        self.ignore_edit = True
+        code, report = self.run_driver(basic=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["file_checks"], {"write_read": True, "edit_read": False, "after_resume": False})
+        self.assertTrue(report["sandbox_cleanup_confirmed"])
+        self.assertFalse(any(method == "PauseSandbox" for method, _ in self.calls))
 
     def test_no_create_opt_in_stops_before_any_rpc(self):
         with self.assertRaises(SystemExit) as error:

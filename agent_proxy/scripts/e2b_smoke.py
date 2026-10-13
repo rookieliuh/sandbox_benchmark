@@ -59,6 +59,8 @@ def main():
     cleaned = False
     sid = ''
     records = []
+    file_checks = {} if args.basic_lifecycle else {
+        'write_read': False, 'edit_read': False, 'after_resume': False}
     proxy_exit = {'returncode': None, 'forced_kill': False, 'normal_exit': False}
     env = os.environ.copy()
     for name in ('NO_PROXY', 'no_proxy'):
@@ -88,6 +90,8 @@ def main():
         records.append({'method': method, 'status': code, 'proxy_elapsed_ms': elapsed,
                         'rpc_wall_ms': (time.monotonic() - started) * 1000,
                         'request_id': body['meta']['request_id']})
+        if method == 'RunStep':
+            records[-1]['tool'] = body['tool']
         label = f'RunStep[{body["tool"]}]' if method == 'RunStep' else method
         print(f'{label}: {code}; proxy_elapsed_ms={elapsed}', flush=True)
         if code != 'ERROR_OK':
@@ -137,12 +141,18 @@ def main():
                 raise RuntimeError('Command output mismatch')
             if not args.basic_lifecycle:
                 path = '/tmp/' + run + '.txt'
+                print('File check [write-read]: starting', flush=True)
                 step('write', {'path': path, 'content': 'agent proxy smoke'})
                 if step('read', {'path': path})['content'] != 'agent proxy smoke':
                     raise RuntimeError('Initial file write/read mismatch')
+                file_checks['write_read'] = True
+                print('File check [write-read]: PASS', flush=True)
+                print('File check [edit-read]: starting', flush=True)
                 step('edit', {'path': path, 'oldString': 'proxy', 'newString': 'benchmark'})
                 if step('read', {'path': path})['content'] != 'agent benchmark smoke':
                     raise RuntimeError('File roundtrip mismatch')
+                file_checks['edit_read'] = True
+                print('File check [edit-read]: PASS', flush=True)
             paused = rpc('PauseSandbox', {'sandbox_id': sid})
             if paused['sandbox']['state'] != 'SANDBOX_PAUSED':
                 raise RuntimeError('Pause was not verified')
@@ -150,8 +160,11 @@ def main():
             if resumed['sandbox']['state'] != 'SANDBOX_READY' or resumed['sandbox']['sandbox_id'] != sid:
                 raise RuntimeError('Resume or identity mismatch')
             if not args.basic_lifecycle:
+                print('File check [after-resume]: starting', flush=True)
                 if step('read', {'path': path})['content'] != 'agent benchmark smoke':
                     raise RuntimeError('File was not preserved across pause/resume')
+                file_checks['after_resume'] = True
+                print('File check [after-resume]: PASS', flush=True)
                 record = rpc('GetStatus', {'operation_request_id': create_id})
                 if record['operation']['info']['state'] != 'OPERATION_SUCCEEDED':
                     raise RuntimeError('Create operation record missing')
@@ -195,6 +208,7 @@ def main():
     if args.report:
         args.report.write_text(json.dumps({'passed': passed, 'run_id': run, 'create_request_id': create_id,
                                'basic_lifecycle': args.basic_lifecycle, 'perf_cases': records,
+                               'file_checks': file_checks,
                                'sandbox_cleanup_confirmed': cleaned, 'proxy_log': str(log_path),
                                'process_exits': {'proxy': proxy_exit}}, indent=2), encoding='utf-8')
     if passed:

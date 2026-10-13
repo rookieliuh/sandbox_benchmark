@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from prepare_spdiag import extract, relocate
-from validate_spdiag import METHODS, verify_counts, verify_durations
+from validate_spdiag import FILE_TOOL_COUNTS, METHODS, verify_counts, verify_durations
 
 
 class SpDiagToolsTest(unittest.TestCase):
@@ -24,13 +24,29 @@ class SpDiagToolsTest(unittest.TestCase):
                       "Point": method, "Lvl": "1", "Ticks": "2", "Good": "1", "Bad": "1",
                       "Not": "0", "Total(ns)": "100", "Max(ns)": "75"} for method in METHODS]
 
-    def check_rows(self, *, success_only=False):
+    def check_rows(self, *, success_only=False, expected_success_counts=None):
         path = self.directory / "summary.csv"
         with path.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=self.rows[0].keys())
             writer.writeheader()
             writer.writerows(self.rows)
-        return verify_counts(path, self.cases, success_only=success_only)
+        return verify_counts(path, self.cases, success_only=success_only,
+                             expected_success_counts=expected_success_counts)
+
+    def test_file_workload_counts_and_detect_missing_read(self):
+        self.cases = [{"method": method, "status": "ERROR_OK"}
+                      for method, count in FILE_TOOL_COUNTS.items() for _ in range(count)]
+        for row in self.rows:
+            count = FILE_TOOL_COUNTS[row["Point"]]
+            row.update(Ticks=str(count), Good=str(count), Bad="0")
+        actual = self.check_rows(expected_success_counts=FILE_TOOL_COUNTS)
+        self.assertEqual(actual["RunStep"]["Good"], 6)
+        self.assertEqual(actual["GetStatus"]["Good"], 3)
+        # Even matching CSV/request counts must reject an incomplete file workload.
+        self.cases.pop(next(i for i, case in enumerate(self.cases) if case["method"] == "RunStep"))
+        next(row for row in self.rows if row["Point"] == "RunStep").update(Ticks="5", Good="5")
+        with self.assertRaisesRegex(AssertionError, "expected successful RPC counts"):
+            self.check_rows(expected_success_counts=FILE_TOOL_COUNTS)
 
     def test_exact_success_failure_counts(self):
         self.assertEqual(len(self.check_rows()), 6)

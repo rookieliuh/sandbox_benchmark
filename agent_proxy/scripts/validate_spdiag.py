@@ -22,6 +22,8 @@ from prepare_spdiag import PACKAGES, digest
 
 ROOT = Path(__file__).resolve().parents[1]
 METHODS = ("CreateSandbox", "RunStep", "PauseSandbox", "ResumeSandbox", "DeleteSandbox", "GetStatus")
+FILE_TOOL_COUNTS = {method: (6 if method == "RunStep" else 3 if method == "GetStatus" else 1)
+                    for method in METHODS}
 
 
 def select_e2b_target(path, backend=None, template=None):
@@ -47,7 +49,7 @@ def select_e2b_target(path, backend=None, template=None):
     return backend, template, cpu, memory, selected["api_key_env"]
 
 
-def verify_counts(csv_path, cases, *, success_only=False):
+def verify_counts(csv_path, cases, *, success_only=False, expected_success_counts=None):
     expected = {method: Counter() for method in METHODS}
     for case in cases:
         expected[case["method"]]["Good" if case["status"] == "ERROR_OK" else "Bad"] += 1
@@ -72,7 +74,14 @@ def verify_counts(csv_path, cases, *, success_only=False):
         actual[method] = counts
     if set(actual) != set(METHODS):
         raise AssertionError(f"missing points: {set(METHODS) - set(actual)}")
-    if success_only:
+    if expected_success_counts is not None:
+        if success_only or set(expected_success_counts) != set(METHODS):
+            raise ValueError("choose one complete success-count policy")
+        if (len(cases) != sum(expected_success_counts.values()) or
+                any(v["Good"] != expected_success_counts[m] or v["Bad"] != 0
+                    for m, v in expected.items())):
+            raise AssertionError("workload does not match the expected successful RPC counts")
+    elif success_only:
         if len(cases) != 6 or any(v["Good"] != 1 or v["Bad"] != 0 for v in expected.values()):
             raise AssertionError("success-only workload must have exactly one success per RPC")
     elif not all(expected[m]["Good"] for m in METHODS) or not any(v["Bad"] for v in expected.values()):
@@ -153,6 +162,8 @@ def main():
                         help="Collect one success per RPC; omit fault cases and the five-second probe")
     parser.add_argument("--e2b-config", type=Path,
                         help="Opt in to a real E2B basic lifecycle using this existing local config")
+    parser.add_argument("--e2b-file-tools", action="store_true",
+                        help="Also verify write/read/edit and file persistence across pause/resume")
     parser.add_argument("--backend", help="Required only if the real config contains multiple backends")
     parser.add_argument("--template", help="Required only if the selected backend has multiple templates")
     parser.add_argument("--allow-create", action="store_true",
@@ -161,7 +172,7 @@ def main():
     real_e2b = args.e2b_config is not None
     if real_e2b and not args.allow_create:
         parser.error("--e2b-config requires --allow-create")
-    if not real_e2b and (args.allow_create or args.backend or args.template):
+    if not real_e2b and (args.allow_create or args.backend or args.template or args.e2b_file_tools):
         parser.error("real E2B options require --e2b-config")
     if real_e2b and args.success_only:
         parser.error("--e2b-config already selects the basic lifecycle; omit --success-only")
@@ -212,7 +223,7 @@ def main():
             raise ValueError("API key is empty or malformed")
         env[key_env] = key
     report = {"passed": False, "shm_name": name, "session": str(session), "cleanup_confirmed": False,
-              "success_only": args.success_only, "real_e2b": real_e2b}
+              "success_only": args.success_only, "real_e2b": real_e2b, "e2b_file_tools": args.e2b_file_tools}
     if real_e2b:
         report["sandbox_cleanup_confirmed"] = False
     attempted_start = False
@@ -227,8 +238,9 @@ def main():
 
     print(f"Private SpDiag session: {session}", flush=True)
     if real_e2b:
-        print(f"Mode: REAL E2B basic lifecycle; backend={backend}, template={template}, "
-              f"cpu={cpu}, memory_mib={memory}, ttl=300s. One new sandbox; no file-tool tests.\n"
+        workload = "file tools and pause/resume persistence" if args.e2b_file_tools else "basic lifecycle"
+        print(f"Mode: REAL E2B {workload}; backend={backend}, template={template}, "
+              f"cpu={cpu}, memory_mib={memory}, ttl=300s. One new sandbox.\n"
               "SpDiag durations are raw/unvalidated due to the known RPM issue; "
               "proxy_elapsed_ms is the independent timing reference.", flush=True)
     elif args.success_only:
@@ -247,7 +259,9 @@ def main():
         if real_e2b:
             command.extend(["--backends", str(args.e2b_config), "--backend", backend,
                             "--template", template, "--cpu", str(cpu), "--memory-mib", str(memory),
-                            "--ttl", "300", "--basic-lifecycle", "--allow-create"])
+                            "--ttl", "300", "--allow-create"])
+            if not args.e2b_file_tools:
+                command.append("--basic-lifecycle")
         elif args.success_only:
             command.append("--success-only")
         run_e2e(command, session, env, real_e2b=real_e2b)
@@ -256,6 +270,7 @@ def main():
             report["sandbox_cleanup_confirmed"] = e2e["sandbox_cleanup_confirmed"]
             report["create_request_id"] = e2e["create_request_id"]
             report["rpc_cases"] = e2e["perf_cases"]
+            report["file_checks"] = e2e["file_checks"]
         report["process_exits"] = e2e["process_exits"]
         # e2e waits for graceful proxy shutdown; SDK Shutdown flushes the final accumulators.
         output = cli_run("show", "show", "--csv", str(session / "csv"))
@@ -267,7 +282,8 @@ def main():
             raise AssertionError("E2E report did not pass")
         print(f"Proxy shutdown: {report['process_exits']['proxy']}", flush=True)
         report["counters"] = verify_counts(csv_files[0], e2e["perf_cases"],
-                                          success_only=args.success_only or real_e2b)
+                                          success_only=args.success_only or (real_e2b and not args.e2b_file_tools),
+                                          expected_success_counts=FILE_TOOL_COUNTS if args.e2b_file_tools else None)
         report["counter_check_passed"] = True
         if real_e2b:
             report["duration_check_passed"] = None
@@ -293,7 +309,8 @@ def main():
         (session / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     for method, counts in report.get("counters", {}).items():
         print(f"{method}: good={counts['Good']} bad={counts['Bad']} abandon={counts['Not']}")
-    scope = "real E2B basic lifecycle and SpDiag counters (SDK durations unvalidated)" if real_e2b else "SpDiag six-RPC counters and timing"
+    scope = (f"real E2B {workload} and SpDiag counters (SDK durations unvalidated)"
+             if real_e2b else "SpDiag six-RPC counters and timing")
     if real_e2b:
         print(f"Real sandbox cleanup confirmed: {report['sandbox_cleanup_confirmed']}")
     print(f"{'PASS' if report['passed'] else 'FAIL'}: {scope}; "

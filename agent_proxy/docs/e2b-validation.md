@@ -146,6 +146,47 @@ TTL 是后端超时设置，不能代替清理确认。失败时可能增加用�
 
 ### 包含文件工具的完整验证
 
+继续使用独立 SpDiag 采集时，在真实模式增加 `--e2b-file-tools`：
+
+```bash
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  source scripts/use_local_deps.sh
+  export NO_PROXY='*' no_proxy='*'
+  mkdir -p validation-logs
+  ap_log="validation-logs/e2b-files-spdiag-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  set +e
+  nice -n 10 python3 -u -B scripts/validate_spdiag.py \
+    --build-dir "$PWD/build-spdiag" \
+    --e2b-config configs/e2b-smoke-20261012T195909-3371445.local.json \
+    --backend e2b-test --template benchmark-base \
+    --e2b-file-tools --allow-create 2>&1 | tee "$ap_log"
+  ap_rc=${PIPESTATUS[0]}
+  printf '\n文件工具验证退出码：%s\n完整日志：%s\n' "$ap_rc" "$ap_log"
+  exit "$ap_rc"
+)
+```
+
+这里的配置路径是本次已核验服务器上的文件，其他部署需选择自己的已验证配置。
+复用现有二进制和 RPM，无需重新编译或修改系统。只创建一个测试沙箱，所有文件操作均位于
+该沙箱内的 `/tmp/smoke-<本次随机ID>.txt`，不会读写宿主机或其他沙箱的文件。
+写入 `agent proxy smoke` 后读回，再编辑为 `agent benchmark smoke` 并读回；暂停恢复后
+再次核对内容。阶段输出为 `File check [write-read/edit-read/after-resume]: PASS`，
+报告的 `file_checks` 分别保存验证结果。仅工具返回成功但内容不符也会失败。
+
+正常计数为 Create/Pause/Resume/Delete 各 1，RunStep 为 6（bash、write、read、edit、read、read），
+GetStatus 为 3（就绪查询、创建记录查询、清理前确认），共 13 次，Bad/Not 均为 0。
+SpDiag 仍按 RPC 聚合，RunStep 六次调用不会产生六个独立 SpDiag 点位；每次工具的代理耗时
+可从终端和报告的 `perf_cases`（含 tool）查看。SDK 耗时继续标记 unvalidated。
+最终 PASS 要求内容检查、生命周期、沙箱清理、代理正常退出和 SpDiag 计数均通过。
+
+失败时贴回三个阶段附近的输出、`Proxy error`、清理结果、请求 ID 和最终状态即可；
+不用上传文件或粘贴 Key。未确认清理前不要连续重跑创建。
+
+若只验证功能、不采集 SpDiag，可直接使用下面原有 smoke 命令：
+
 以下会实际创建资源、执行命令、读写自己的临时文件、暂停、恢复、删除，需要测试资源配额。不要将其他人的 sandbox ID 填入脚本；脚本没有接受已有 ID 的参数。
 
 ```bash
