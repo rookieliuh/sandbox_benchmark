@@ -24,16 +24,42 @@ class SpDiagToolsTest(unittest.TestCase):
                       "Point": method, "Lvl": "1", "Ticks": "2", "Good": "1", "Bad": "1",
                       "Not": "0", "Total(ns)": "100", "Max(ns)": "75"} for method in METHODS]
 
-    def check_rows(self):
+    def check_rows(self, *, success_only=False):
         path = self.directory / "summary.csv"
         with path.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=self.rows[0].keys())
             writer.writeheader()
             writer.writerows(self.rows)
-        return verify_counts(path, self.cases)
+        return verify_counts(path, self.cases, success_only=success_only)
 
     def test_exact_success_failure_counts(self):
         self.assertEqual(len(self.check_rows()), 6)
+
+    def test_success_only_requires_one_good_per_rpc(self):
+        self.cases = [case for case in self.cases if case["status"] == "ERROR_OK"]
+        for row in self.rows:
+            row.update(Ticks="1", Bad="0")
+        self.assertEqual(len(self.check_rows(success_only=True)), 6)
+        # The default full-suite validation must continue to require fault coverage.
+        with self.assertRaisesRegex(AssertionError, "explicit failures"):
+            self.check_rows()
+
+    def test_success_only_rejects_even_matching_fault_counts(self):
+        with self.assertRaisesRegex(AssertionError, "exactly one success"):
+            self.check_rows(success_only=True)
+
+    def test_success_only_still_checks_measured_durations(self):
+        for row in self.rows:
+            row.update({"Total(ns)": "2000000", "Max(ns)": "2000000"})
+        self.check_rows()
+        cases = [{"method": method, "proxy_elapsed_ms": 2} for method in METHODS]
+        verify_durations(self.directory / "summary.csv", cases, require_long_sample=False)
+        with self.assertRaisesRegex(AssertionError, "five-second"):
+            verify_durations(self.directory / "summary.csv", cases)
+        self.rows[0]["Total(ns)"] = "10"
+        self.check_rows()
+        with self.assertRaisesRegex(AssertionError, "below proxy timing"):
+            verify_durations(self.directory / "summary.csv", cases, require_long_sample=False)
 
     def test_detect_abandon(self):
         self.rows[0]["Not"] = "1"

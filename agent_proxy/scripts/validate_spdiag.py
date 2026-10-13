@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 METHODS = ("CreateSandbox", "RunStep", "PauseSandbox", "ResumeSandbox", "DeleteSandbox", "GetStatus")
 
 
-def verify_counts(csv_path, cases):
+def verify_counts(csv_path, cases, *, success_only=False):
     expected = {method: Counter() for method in METHODS}
     for case in cases:
         expected[case["method"]]["Good" if case["status"] == "ERROR_OK" else "Bad"] += 1
@@ -47,12 +47,15 @@ def verify_counts(csv_path, cases):
         actual[method] = counts
     if set(actual) != set(METHODS):
         raise AssertionError(f"missing points: {set(METHODS) - set(actual)}")
-    if not all(expected[m]["Good"] for m in METHODS) or not any(v["Bad"] for v in expected.values()):
+    if success_only:
+        if len(cases) != 6 or any(v["Good"] != 1 or v["Bad"] != 0 for v in expected.values()):
+            raise AssertionError("success-only workload must have exactly one success per RPC")
+    elif not all(expected[m]["Good"] for m in METHODS) or not any(v["Bad"] for v in expected.values()):
         raise AssertionError("workload must exercise all six successes and explicit failures")
     return actual
 
 
-def verify_durations(csv_path, cases):
+def verify_durations(csv_path, cases, *, require_long_sample=True):
     # Cross-check independent steady_clock timings, allowing rounding and SDK display
     # precision. The deliberate five-second RunStep must not wrap to < 1 second.
     totals = Counter()
@@ -61,7 +64,7 @@ def verify_durations(csv_path, cases):
         method, ms = case["method"], case["proxy_elapsed_ms"]
         totals[method] += ms
         maxima[method] = max(maxima[method], ms)
-    if maxima["RunStep"] < 4900:
+    if require_long_sample and maxima["RunStep"] < 4900:
         raise AssertionError("missing five-second RunStep timing check")
     with csv_path.open(encoding="utf-8-sig", newline="") as stream:
         for row in csv.DictReader(stream):
@@ -104,6 +107,8 @@ def run_e2e(command, session, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build-spdiag")
+    parser.add_argument("--success-only", action="store_true",
+                        help="Collect one success per RPC; omit fault cases and the five-second probe")
     args = parser.parse_args()
     if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
         parser.error("real SpDiag validation requires Linux aarch64")
@@ -142,7 +147,8 @@ def main():
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = str(prefix / "usr/lib64") + (
         ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
-    report = {"passed": False, "shm_name": name, "session": str(session), "cleanup_confirmed": False}
+    report = {"passed": False, "shm_name": name, "session": str(session), "cleanup_confirmed": False,
+              "success_only": args.success_only}
     attempted_start = False
 
     def cli_run(label, *arguments):
@@ -154,6 +160,9 @@ def main():
         return proc.stdout
 
     print(f"Private SpDiag session: {session}", flush=True)
+    if args.success_only:
+        print("Mode: six successful Mock RPCs, one sample each; no injected faults or sleeps.\n"
+              "These samples do not validate the known long-interval RPM timing issue.", flush=True)
     try:
         # Empty/default SHM is never passed to either the CLI or the proxy.
         attempted_start = True
@@ -163,6 +172,8 @@ def main():
         command = [sys.executable, str(ROOT / "tests/integration/e2e.py"),
                    "--proxy", str(build / "agent-proxy"), "--client", str(build / "agent-proxy-client"),
                    "--report", str(session / "e2e.json"), "--spdiag-shm-name", name]
+        if args.success_only:
+            command.append("--success-only")
         run_e2e(command, session, env)
         # e2e waits for graceful proxy shutdown; SDK Shutdown flushes the final accumulators.
         output = cli_run("show", "show", "--csv", str(session / "csv"))
@@ -173,9 +184,9 @@ def main():
         e2e = json.loads((session / "e2e.json").read_text(encoding="utf-8"))
         if not e2e["passed"]:
             raise AssertionError("E2E report did not pass")
-        report["counters"] = verify_counts(csv_files[0], e2e["perf_cases"])
+        report["counters"] = verify_counts(csv_files[0], e2e["perf_cases"], success_only=args.success_only)
         report["counter_check_passed"] = True
-        verify_durations(csv_files[0], e2e["perf_cases"])
+        verify_durations(csv_files[0], e2e["perf_cases"], require_long_sample=not args.success_only)
         report["duration_check_passed"] = True
         report["passed"] = True
     except BaseException:

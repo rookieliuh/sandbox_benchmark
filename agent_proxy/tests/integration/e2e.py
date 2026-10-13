@@ -115,6 +115,23 @@ class Suite:
     def starts(self):
         return sum(path.endswith("/Start") for _, path in self.stats()["calls"])
 
+    def run_success_only(self):
+        """One successful call per RPC; no fault injection or artificial slow command."""
+        sid, created = self.create()
+        try:
+            check(created["sandbox"]["state"] == "SANDBOX_READY", "create readiness")
+            status = self.call("GetStatus", {"sandbox_id": sid})
+            check(status["sandbox"]["state"] == "SANDBOX_READY", "status readiness")
+            result = json.loads(self.step(sid, "bash", {"command": "printf hello"})["result_json"])
+            check(result["exit_code"] == 0 and result["stdout"] == "hello", "successful command output")
+            paused = self.call("PauseSandbox", {"sandbox_id": sid})
+            check(paused["sandbox"]["state"] == "SANDBOX_PAUSED", "pause state")
+            resumed = self.call("ResumeSandbox", {"sandbox_id": sid})
+            check(resumed["sandbox"]["state"] == "SANDBOX_READY", "resume readiness")
+        finally:
+            deleted = self.call("DeleteSandbox", {"sandbox_id": sid})
+            check(deleted["cleanup_confirmed"], "successful sandbox cleanup")
+
     def run(self):
         # The default fixture uses real envd's empty 204 throughout create/status/resume.
         # Keep coverage for compatible backends that return 200 as well.
@@ -313,6 +330,8 @@ def main():
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--spdiag-shm-name", default="",
                         help="Instrument only the main test proxy in a pre-created dedicated SHM")
+    parser.add_argument("--success-only", action="store_true",
+                        help="Run exactly one normal lifecycle, without fault or long-sleep cases")
     args = parser.parse_args()
     check(args.proxy.is_file() and args.client.is_file(), "compile both C++ binaries first")
     args.report.parent.mkdir(parents=True, exist_ok=True)
@@ -323,12 +342,13 @@ def main():
     config = {"backends": {"mock": {"type": "e2b", "profile": "kasandbox",
               "api_url": f"http://127.0.0.1:{mock_port}", "api_key_env": "MOCK_E2B_API_KEY",
               "envd_url_pattern": f"http://127.0.0.1:{mock_port}/envd/{{sandbox_id}}",
-              "templates": {t: {"backend_template_id": t, "cpu_count": 1, "memory_mib": 512} for t in TEMPLATES}}}}
+              "templates": {t: {"backend_template_id": t, "cpu_count": 1, "memory_mib": 512}
+                            for t in (("base",) if args.success_only else TEMPLATES)}}}}
     config_path = artifacts / "backends.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     processes, logs = [], []
     suite = Suite(args.client.resolve(), proxy_port, mock_port, artifacts)
-    report = {"passed": False, "artifacts": str(artifacts.resolve())}
+    report = {"passed": False, "artifacts": str(artifacts.resolve()), "success_only": args.success_only}
     env = dict(os.environ, MOCK_E2B_API_KEY="mock-key", NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
 
     def start(command, name, port):
@@ -344,39 +364,43 @@ def main():
         start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{proxy_port}", f"--backends={config_path}",
                "--control_threads=2", "--step_threads=2",
                f"--spdiag_shm_name={args.spdiag_shm_name}"], "proxy", proxy_port)
-        suite.run()
-        if args.spdiag_shm_name:
-            # A long interval catches SDK tick-to-nanosecond overflow that counter-only
-            # tests cannot find. Keep this out of the ordinary fast CTest workload.
-            long_sid, _ = suite.create()
-            try:
-                measured = suite.step(long_sid, "bash", {"command": "mock:sleep:5000"})
-                check(int(measured["meta"]["proxy_elapsed"]["value_ms"]) >= 4900,
-                      "long PerfPoint validation workload did not wait for five seconds")
-            finally:
-                suite.call("DeleteSandbox", {"sandbox_id": long_sid})
-        report["perf_cases"] = list(suite.records)  # Other instances below do not collect.
-        # Independent instance: record exhaustion must reject before creating any sandbox.
-        capacity_port = unused_port()
-        start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{capacity_port}", f"--backends={config_path}",
-               "--max_records=1"], "capacity", capacity_port)
-        limited = Suite(args.client.resolve(), capacity_port, mock_port, artifacts)
-        limited.sequence = 1000
-        first = limited.call("CreateSandbox", {"backend": "mock", "template": "base", "timeout_ms": 0}, "ERROR_INVALID_ARGUMENT")
-        limited.call("CreateSandbox", {"backend": "mock", "template": "base"}, "ERROR_STORAGE_UNAVAILABLE")
-        limited.operation(first["meta"]["request_id"])
-        suite.records.extend(limited.records)
-        smoke = subprocess.run([sys.executable, str(ROOT / "scripts/e2b_smoke.py"),
-                                "--proxy", str(args.proxy.resolve()), "--client", str(args.client.resolve()),
-                                "--backends", str(config_path.resolve()), "--backend", "mock",
-                                "--template", "base", "--cpu", "1", "--memory-mib", "512", "--allow-create"],
-                               cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
-        (artifacts / "smoke.log").write_text(smoke.stdout + smoke.stderr, encoding="utf-8")
-        check(smoke.returncode == 0, "smoke driver failed against Mock: " + smoke.stdout + smoke.stderr)
-        check("Cleanup confirmed: true" in smoke.stdout, "smoke driver prints cleanup result")
-        check(all(f"RunStep[{tool}]: ERROR_OK" in smoke.stdout for tool in ("bash", "write", "read", "edit")),
-              "smoke driver identifies each tool")
-        report["smoke_driver_passed"] = True
+        if args.success_only:
+            suite.run_success_only()
+            report["perf_cases"] = list(suite.records)
+        else:
+            suite.run()
+            if args.spdiag_shm_name:
+                # A long interval catches SDK tick-to-nanosecond overflow that counter-only
+                # tests cannot find. Keep this out of the ordinary fast CTest workload.
+                long_sid, _ = suite.create()
+                try:
+                    measured = suite.step(long_sid, "bash", {"command": "mock:sleep:5000"})
+                    check(int(measured["meta"]["proxy_elapsed"]["value_ms"]) >= 4900,
+                          "long PerfPoint validation workload did not wait for five seconds")
+                finally:
+                    suite.call("DeleteSandbox", {"sandbox_id": long_sid})
+            report["perf_cases"] = list(suite.records)  # Other instances below do not collect.
+            # Independent instance: record exhaustion must reject before creating any sandbox.
+            capacity_port = unused_port()
+            start([str(args.proxy.resolve()), f"--listen=127.0.0.1:{capacity_port}", f"--backends={config_path}",
+                   "--max_records=1"], "capacity", capacity_port)
+            limited = Suite(args.client.resolve(), capacity_port, mock_port, artifacts)
+            limited.sequence = 1000
+            first = limited.call("CreateSandbox", {"backend": "mock", "template": "base", "timeout_ms": 0}, "ERROR_INVALID_ARGUMENT")
+            limited.call("CreateSandbox", {"backend": "mock", "template": "base"}, "ERROR_STORAGE_UNAVAILABLE")
+            limited.operation(first["meta"]["request_id"])
+            suite.records.extend(limited.records)
+            smoke = subprocess.run([sys.executable, str(ROOT / "scripts/e2b_smoke.py"),
+                                    "--proxy", str(args.proxy.resolve()), "--client", str(args.client.resolve()),
+                                    "--backends", str(config_path.resolve()), "--backend", "mock",
+                                    "--template", "base", "--cpu", "1", "--memory-mib", "512", "--allow-create"],
+                                   cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
+            (artifacts / "smoke.log").write_text(smoke.stdout + smoke.stderr, encoding="utf-8")
+            check(smoke.returncode == 0, "smoke driver failed against Mock: " + smoke.stdout + smoke.stderr)
+            check("Cleanup confirmed: true" in smoke.stdout, "smoke driver prints cleanup result")
+            check(all(f"RunStep[{tool}]: ERROR_OK" in smoke.stdout for tool in ("bash", "write", "read", "edit")),
+                  "smoke driver identifies each tool")
+            report["smoke_driver_passed"] = True
         report["passed"] = True
     except Exception:
         report["error"] = traceback.format_exc()

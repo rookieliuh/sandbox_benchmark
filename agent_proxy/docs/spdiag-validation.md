@@ -131,6 +131,39 @@ SpDiag validation exit: 0
 
 ## 后续单独重跑采集验证
 
+### 只采集六个接口的成功操作
+
+更新代码后，可复用已编译的 `build-spdiag/agent-proxy` 和 `agent-proxy-client`，
+不需要重新编译。本模式依次执行 CreateSandbox → GetStatus → RunStep（`printf hello`）→
+PauseSandbox → ResumeSandbox → DeleteSandbox，各一次；只启动专属回环 Mock 和 Proxy。
+不运行故障用例、容量测试、额外 smoke 流程或 5 秒等待，不访问真实 E2B。
+
+```bash
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  source scripts/use_local_deps.sh
+  mkdir -p validation-logs
+  ap_log="validation-logs/spdiag-success-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  set +e
+  nice -n 10 python3 -u -B scripts/validate_spdiag.py \
+    --build-dir "$PWD/build-spdiag" --success-only 2>&1 | tee "$ap_log"
+  ap_rc=${PIPESTATUS[0]}
+  printf '\nSuccess-only test exit: %s\nFull log: %s\n' "$ap_rc" "$ap_log"
+  exit "$ap_rc"
+)
+```
+
+正常预期六行均 Ticks=1、Good=1、Bad=0、Not=0；每行 Total/Avg/Min/Max 应一致，
+单位为纳秒。脚本继续验证计数和已有代理计时的基本一致性，只在此模式下不要求失败样本或
+5 秒样本。默认完整测试的检查保持不变，意外失败也不会改成 Good。
+每次使用新的项目内目录、随机回环端口及独立 SpDiag SHM，退出时清理本次进程和 SHM。
+
+这组单样本结果用于查看正常流程的打点，不能代表真实 E2B 性能或延迟分布；通过也不表示
+已修复当前 RPM 的长区间计时问题。请粘贴 SpDiag 六行表格、最后 PASS/FAIL 和
+`cleanup_confirmed`；失败时再粘贴会话目录中的 `report.json` 与 `e2e.log`。
+
 ### 独立 SDK 的 1 秒 / 5 秒最小复现
 
 若需排除代理计时、bRPC 和异步回调的影响，运行独立项目
