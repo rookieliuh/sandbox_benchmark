@@ -262,6 +262,8 @@ def main():
                             "--ttl", "300", "--allow-create"])
             if not args.e2b_file_tools:
                 command.append("--basic-lifecycle")
+            else:
+                command.append("--private-file-workspace")
         elif args.success_only:
             command.append("--success-only")
         run_e2e(command, session, env, real_e2b=real_e2b)
@@ -271,6 +273,7 @@ def main():
             report["create_request_id"] = e2e["create_request_id"]
             report["rpc_cases"] = e2e["perf_cases"]
             report["file_checks"] = e2e["file_checks"]
+            report["file_workspace"] = e2e["file_workspace"]
         report["process_exits"] = e2e["process_exits"]
         # e2e waits for graceful proxy shutdown; SDK Shutdown flushes the final accumulators.
         output = cli_run("show", "show", "--csv", str(session / "csv"))

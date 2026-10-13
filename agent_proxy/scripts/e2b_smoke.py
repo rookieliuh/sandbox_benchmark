@@ -29,12 +29,16 @@ def main():
     parser.add_argument('--ttl', type=int, default=300)
     parser.add_argument('--basic-lifecycle', action='store_true',
                         help='Six normal RPCs only: bash printf, no file-tool tests or injected delays')
+    parser.add_argument('--private-file-workspace', action='store_true',
+                        help='Create a private directory inside the new sandbox for file tests')
     parser.add_argument('--spdiag-shm-name', default='', help='Existing private /agent_proxy_* SHM')
     parser.add_argument('--report', type=Path, help='Write sanitized RPC timing and cleanup results')
     parser.add_argument('--allow-create', action='store_true', help='Authorize one test sandbox and lifecycle operations')
     args = parser.parse_args()
     if not args.allow_create:
         parser.error('--allow-create is required: this test creates, pauses, resumes and deletes one sandbox')
+    if args.basic_lifecycle and args.private_file_workspace:
+        parser.error('--private-file-workspace requires the full file-tool flow')
     if min(args.cpu, args.memory_mib, args.ttl) <= 0:
         parser.error('CPU, memory and TTL must be positive')
     if args.spdiag_shm_name and (not args.spdiag_shm_name.startswith('/agent_proxy_') or
@@ -47,6 +51,8 @@ def main():
         if not path.is_file():
             parser.error('proxy/client/config file missing')
     run = 'smoke-' + uuid.uuid4().hex
+    # Only a fixed prefix and UUID hex; never reuse an existing directory.
+    workspace = '/tmp/' + run if args.private_file_workspace else ''
     create_id = run + '-create'
     port = free_port()
     output = Path('validation-logs')
@@ -136,11 +142,13 @@ def main():
             observed = rpc('GetStatus', {'sandbox_id': sid})
             if observed['sandbox']['state'] != 'SANDBOX_READY':
                 raise RuntimeError('Sandbox is not READY')
-            result = step('bash', {'command': 'printf hello'})
+            command = f'mkdir -m 700 -- {workspace} && printf hello' if workspace else 'printf hello'
+            result = step('bash', {'command': command})
             if result['stdout'] != 'hello' or result['exit_code'] != 0:
-                raise RuntimeError('Command output mismatch')
+                raise RuntimeError('Command output mismatch or sandbox workspace creation failed')
             if not args.basic_lifecycle:
-                path = '/tmp/' + run + '.txt'
+                path = workspace + '/roundtrip.txt' if workspace else '/tmp/' + run + '.txt'
+                print(f'File location (inside own sandbox): {path}', flush=True)
                 print('File check [write-read]: starting', flush=True)
                 step('write', {'path': path, 'content': 'agent proxy smoke'})
                 if step('read', {'path': path})['content'] != 'agent proxy smoke':
@@ -208,6 +216,7 @@ def main():
     if args.report:
         args.report.write_text(json.dumps({'passed': passed, 'run_id': run, 'create_request_id': create_id,
                                'basic_lifecycle': args.basic_lifecycle, 'perf_cases': records,
+                               'file_workspace': workspace,
                                'file_checks': file_checks,
                                'sandbox_cleanup_confirmed': cleaned, 'proxy_log': str(log_path),
                                'process_exits': {'proxy': proxy_exit}}, indent=2), encoding='utf-8')

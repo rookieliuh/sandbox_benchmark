@@ -32,6 +32,7 @@ class RealBasicFlowTest(unittest.TestCase):
         self.fail_method = None
         self.corrupt_after_resume = False
         self.ignore_edit = False
+        self.workspace_failure = False
         self.process = Mock()
         self.process.poll.return_value = None
         self.process.returncode = 0
@@ -53,8 +54,12 @@ class RealBasicFlowTest(unittest.TestCase):
             tool = body["tool"]
             value = {}
             if tool == "bash":
-                self.assertEqual(args["command"], "printf hello")
+                if args["command"] != "printf hello":
+                    self.assertRegex(args["command"],
+                                     r"^mkdir -m 700 -- /tmp/smoke-[0-9a-f]{32} && printf hello$")
                 value = {"stdout": "hello", "exit_code": 0}
+                if self.workspace_failure:
+                    value = {"stdout": "", "exit_code": 1}
             elif tool == "write":
                 self.files[args["path"]] = args["content"]
             elif tool == "edit":
@@ -67,12 +72,14 @@ class RealBasicFlowTest(unittest.TestCase):
             result["result_json"] = json.dumps(value)
         return subprocess.CompletedProcess(command, 0 if code == "ERROR_OK" else 2, json.dumps(result), "")
 
-    def run_driver(self, basic=True, allow=True):
+    def run_driver(self, basic=True, allow=True, private_workspace=False):
         argv = ["e2b_smoke", "--proxy", "proxy", "--client", "client", "--backends", "config.json",
                 "--backend", "actual", "--template", "base", "--cpu", "1", "--memory-mib", "1024",
                 "--report", "report.json", "--spdiag-shm-name", "/agent_proxy_test"]
         if basic:
             argv.append("--basic-lifecycle")
+        if private_workspace:
+            argv.append("--private-file-workspace")
         if allow:
             argv.append("--allow-create")
         with patch.object(sys, "argv", argv), patch.object(e2b_smoke, "free_port", return_value=12345), \
@@ -134,6 +141,26 @@ class RealBasicFlowTest(unittest.TestCase):
         self.assertEqual(report["file_checks"], {"write_read": True, "edit_read": True, "after_resume": False})
         self.assertTrue(report["sandbox_cleanup_confirmed"])
         self.assertEqual(self.calls[-1][1]["create_request_id"], report["create_request_id"])
+
+    def test_private_workspace_roundtrip_and_persistence(self):
+        code, report = self.run_driver(basic=False, private_workspace=True)
+        self.assertEqual(code, 0)
+        workspace = '/tmp/' + report['run_id']
+        self.assertEqual(report['file_workspace'], workspace)
+        paths = {json.loads(body['arguments_json'])['path'] for method, body in self.calls
+                 if method == 'RunStep' and body['tool'] != 'bash'}
+        self.assertEqual(paths, {workspace + '/roundtrip.txt'})
+        self.assertEqual(report['file_checks'], {'write_read': True, 'edit_read': True, 'after_resume': True})
+        self.assertEqual(len(report['perf_cases']), 13)
+
+    def test_failed_workspace_creation_stops_files_and_cleans_sandbox(self):
+        self.workspace_failure = True
+        code, report = self.run_driver(basic=False, private_workspace=True)
+        self.assertEqual(code, 1)
+        self.assertEqual([body['tool'] for method, body in self.calls if method == 'RunStep'], ['bash'])
+        self.assertFalse(any(report['file_checks'].values()))
+        self.assertTrue(report['sandbox_cleanup_confirmed'])
+        self.assertEqual(self.calls[-1][1]['create_request_id'], report['create_request_id'])
 
     def test_successful_edit_response_with_wrong_contents_fails(self):
         self.ignore_edit = True

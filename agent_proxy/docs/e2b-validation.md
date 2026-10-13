@@ -171,7 +171,10 @@ TTL 是后端超时设置，不能代替清理确认。失败时可能增加用�
 
 这里的配置路径是本次已核验服务器上的文件，其他部署需选择自己的已验证配置。
 复用现有二进制和 RPM，无需重新编译或修改系统。只创建一个测试沙箱，所有文件操作均位于
-该沙箱内的 `/tmp/smoke-<本次随机ID>.txt`，不会读写宿主机或其他沙箱的文件。
+该沙箱内的 `/tmp/smoke-<本次随机ID>/roundtrip.txt`，不会读写宿主机或其他沙箱的文件。
+文件模式会在原有 bash 调用中先以 `mkdir -m 700` 创建本次专用目录，再输出 hello；
+目录已存在或创建失败就停止文件测试并清理自己的沙箱。不更改已有目录权限或系统配置。
+报告的 `file_workspace` 记录此次路径。bash 的耗时包含目录创建，不宜与此前仅 printf 的样本直接比较。
 写入 `agent proxy smoke` 后读回，再编辑为 `agent benchmark smoke` 并读回；暂停恢复后
 再次核对内容。阶段输出为 `File check [write-read/edit-read/after-resume]: PASS`，
 报告的 `file_checks` 分别保存验证结果。仅工具返回成功但内容不符也会失败。
@@ -181,6 +184,16 @@ GetStatus 为 3（就绪查询、创建记录查询、清理前确认），共 1
 SpDiag 仍按 RPC 聚合，RunStep 六次调用不会产生六个独立 SpDiag 点位；每次工具的代理耗时
 可从终端和报告的 `perf_cases`（含 tool）查看。SDK 耗时继续标记 unvalidated。
 最终 PASS 要求内容检查、生命周期、沙箱清理、代理正常退出和 SpDiag 计数均通过。
+
+已知限制：此前直接写入 `/tmp/smoke-<随机ID>.txt` 时，首次 write/read 成功，但 edit
+覆盖回写出现 `OPEN_FILE / PERMISSION_DENIED`。参考 envd 实现对已有文件先 chown，
+再以 `O_CREAT` 打开；这可能触发 Linux `fs.protected_regular` 对 sticky 目录的保护，
+目前尚未读取实际沙箱参数以确认根因。参见
+[内核文档](https://docs.kernel.org/admin-guide/sysctl/fs.html#protected-regular)。
+专用目录模式用于继续验证文件工具和暂停恢复，并不意味着原 `/tmp` 覆盖问题已修复。
+不修改 envd、代理文件写入逻辑、系统保护参数，也不先删文件再重建来掩盖失败。
+直接调用 `e2b_smoke.py` 时可增加 `--private-file-workspace` 使用相同目录；不加该参数
+仍保留原 `/tmp` 平铺文件流程，便于单独复现问题。
 
 失败时贴回三个阶段附近的输出、`Proxy error`、清理结果、请求 ID 和最终状态即可；
 不用上传文件或粘贴 Key。未确认清理前不要连续重跑创建。
