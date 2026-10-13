@@ -258,3 +258,13 @@ source（control/envd）、phase、method、resource 和 http_status；不输出
 例如 envd / operation / GET / file 表示文件读取被拒绝，而 envd / operation / POST / file
 表示上传失败。冒烟脚本按 RunStep[bash/write/read/edit] 打印工具名，先独立验证写入后的读取，
 再验证编辑和编辑后的读取。根据具体状态排查，不从 ERROR_BACKEND_ERROR 推断某一种根因。
+
+若 envd 的 `POST /files` 返回 HTTP 500，代理还会从已识别的 JSON 错误前缀/后缀中提取
+固定分类 `envd_upload_stage` 和 `envd_upload_reason`，例如
+`OPEN_FILE / PERMISSION_DENIED`、`CHOWN_FILE / OPERATION_NOT_PERMITTED` 或
+`PARSE_MULTIPART / UNKNOWN`。不输出响应正文、文件路径、token 或任意后端消息；
+不识别的格式只显示 UNKNOWN。HTTP_500 和操作结果不确定的原有语义保持不变，不自动重试写入。
+
+首次 write/read 成功、edit 在 POST 回写失败时，已知差别是新建文件与覆盖已有文件，
+尚不能仅靠 HTTP 500 断言权限或 SDK 问题。分类信息用于确定后续需要的证据；
+不要因此修改宿主机 sysctl、放宽文件权限，或将 edit 改成先删后写来绕过失败。

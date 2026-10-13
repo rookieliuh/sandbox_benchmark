@@ -7,9 +7,62 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <nlohmann/json.hpp>
 
 namespace ap {
 namespace {
+std::string upload_error_category(const HttpResponse& response, const HttpRequest& request) {
+  if (request.source != Source::Envd || request.resource != "file" || request.method != "POST" ||
+      response.status != 500)
+    return "";
+  // Envd JSON errors contain paths and may contain other private data. Only emit
+  // fixed categories from its known error prefixes/suffixes, never any raw text.
+  const char* stage = "UNKNOWN";
+  const char* reason = "UNKNOWN";
+  const auto body = nlohmann::json::parse(response.body, nullptr, false);
+  if (body.is_object() && body.contains("message") && body["message"].is_string()) {
+    const auto& message = body["message"].get_ref<const std::string&>();
+    const std::pair<const char*, const char*> stages[] = {
+        {"error ensuring directories: ", "ENSURE_DIRECTORIES"},
+        {"error getting file info: ", "STAT_FILE"},
+        {"error changing file ownership: ", "CHOWN_FILE"},
+        {"error opening file: ", "OPEN_FILE"},
+        {"error writing file: ", "WRITE_FILE"},
+        {"error parsing multipart form: ", "PARSE_MULTIPART"},
+        {"error reading form: ", "READ_MULTIPART"},
+        {"error getting user ids: ", "RESOLVE_USER_IDS"},
+        {"error marshaling response: ", "ENCODE_RESPONSE"}};
+    bool recognized = false;
+    for (const auto& item : stages) {
+      if (message.rfind(item.first, 0) == 0) {
+        stage = item.second;
+        recognized = true;
+        break;
+      }
+    }
+    if (recognized) {
+      const std::pair<const char*, const char*> reasons[] = {
+          {"permission denied", "PERMISSION_DENIED"},
+          {"operation not permitted", "OPERATION_NOT_PERMITTED"},
+          {"read-only file system", "READ_ONLY_FILESYSTEM"},
+          {"no space left on device", "NO_SPACE"},
+          {"no such file or directory", "NOT_FOUND"},
+          {"input/output error", "IO_ERROR"},
+          {"unexpected EOF", "UNEXPECTED_EOF"},
+          {"EOF", "EOF"}};
+      for (const auto& item : reasons) {
+        const std::string suffix = item.first;
+        if (message.size() >= suffix.size() &&
+            message.compare(message.size() - suffix.size(), suffix.size(), suffix) == 0) {
+          reason = item.second;
+          break;
+        }
+      }
+    }
+  }
+  return "; envd_upload_stage=" + std::string(stage) + "; envd_upload_reason=" + reason;
+}
+
 struct Easy {
   CURL* handle = curl_easy_init();
   ~Easy() {
@@ -254,7 +307,7 @@ void HttpClient::require_success(const HttpResponse& r, const HttpRequest& req,
   Error e(code,
           "backend rejected request: source=" + std::string(source) + "; phase=" + phase +
               "; method=" + req.method + "; resource=" + req.resource +
-              "; http_status=" + std::to_string(r.status),
+              "; http_status=" + std::to_string(r.status) + upload_error_category(r, req),
           req.source, req.resource);
   e.http_status = r.status;
   e.backend_code = "HTTP_" + std::to_string(r.status);

@@ -137,6 +137,46 @@ int main() {
                  message.find("example.invalid") == std::string::npos,
              "do not expose headers, URL or backend response body");
     }
+    request.method = "POST";
+    request.mutation = true;
+    auto check_upload_error = [&](const std::string& body, const char* stage, const char* reason) {
+      response.body = body;
+      ctx.outcome = Outcome::Unknown;
+      try {
+        HttpClient::require_success(response, request, ctx);
+        expect(false, "upload failure must remain a failure");
+      } catch (const Error& error) {
+        const std::string message = error.what();
+        expect(message.find(std::string("envd_upload_stage=") + stage) != std::string::npos &&
+                   message.find(std::string("envd_upload_reason=") + reason) != std::string::npos,
+               "classify upload failure without raw backend text");
+        expect(error.code == Code::BackendError && error.backend_code == "HTTP_500" &&
+                   ctx.outcome == Outcome::Unknown,
+               "diagnostics must not change error code or claim mutation outcome");
+        expect(message.find("private-") == std::string::npos &&
+                   message.find("example.invalid") == std::string::npos,
+               "upload diagnostics must not expose body, path, URL, or credentials");
+      }
+    };
+    check_upload_error(
+        Json{{"message", "error opening file: open /tmp/private-file: permission denied"},
+             {"token", "private-token"}}
+            .dump(),
+        "OPEN_FILE", "PERMISSION_DENIED");
+    check_upload_error(
+        Json{{"message",
+              "error changing file ownership: chown /tmp/private-file: operation not permitted"}}
+            .dump(),
+        "CHOWN_FILE", "OPERATION_NOT_PERMITTED");
+    check_upload_error(Json{{"message", "error reading form: private-body: unexpected EOF"}}.dump(),
+                       "READ_MULTIPART", "UNEXPECTED_EOF");
+    check_upload_error(
+        Json{{"message", "error writing file: /private-path: read-only file system"}}.dump(),
+        "WRITE_FILE", "READ_ONLY_FILESYSTEM");
+    check_upload_error("<html>private-backend-body</html>", "UNKNOWN", "UNKNOWN");
+    check_upload_error(Json{{"message", 123}}.dump(), "UNKNOWN", "UNKNOWN");
+    check_upload_error(Json{{"message", "private-body: permission denied"}}.dump(), "UNKNOWN",
+                       "UNKNOWN");
     ctx.deadline = Clock::now() - std::chrono::milliseconds(1);
     rejects(Code::DeadlineExceeded, [&] { ctx.check(); });
     std::cout << count << " core checks passed\n";
