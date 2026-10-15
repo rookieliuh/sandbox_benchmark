@@ -224,7 +224,50 @@ CLI 使用专属工作目录的 `spdiag.conf`，创建随机 `/spdiag_minimal_<u
 这支持长区间换算/统计异常，需要结合 RPM 实现定位，不能仅凭这一现象断言具体溢出代码。
 若都通过，再回到代理的跨线程集成和累积刷新行为排查。
 
-### 六个 RPC 的完整采集验证
+### 使用 SpDiag PR #17 重跑原 1 秒 / 5 秒复现
+
+`python3 -u -B scripts/check_spdiag_minimal.py --pr17` 会独立拉取
+`https://gitcode.com/openeuler/spdiag.git` 的 `refs/merge-requests/17/head`，
+要求提交严格等于 `dd134e4fbb583ecd5be45ac3cde3f1cf5cc66de6`，如 PR 更新则停止，
+不能未经审查自动跟随。该提交在普通点和全局点的 tick→ns 换算中使用 128 位乘法中间值。
+
+构建在新建的 `.deps/spdiag-pr17-<随机ID>/` 内进行，源码、build、install 分离；
+源码不打补丁且构建后检查 Git 工作区干净。只用已有 Git、CMake、C++ 编译工具，
+单并行构建，将 SDK/CLI 安装到本次私有 install/usr；不会执行系统包安装或 ldconfig。
+默认配置文件也安装在私有前缀内，清除子进程继承的 DESTDIR，避免重定向安装。
+旧 `.deps/spdiag`、原始 RPM、根目录的参考仓库及已有服务均不替换。
+
+该源码构建启用共享 SDK、Percentile、PerfLog，关闭 MemPoint、OB Memory、OB Cache
+以及上游测试/示例，避免为本轮 PerfPoint 复验安装 eBPF 等额外依赖。
+因此它是源码修复的定向验证，不能当作原 all-on RPM 的替代制品验收。
+
+测量程序 `tests/spdiag_minimal`、两次 sleep 和耗时/计数判定保持不变：
+1 秒和 5 秒都需要通过。脚本核对实际加载库位于本次前缀且 SHA256 与本次构建清单一致，
+输出新库摘要，并在报告记录源码提交与构建选项。运行前先更新自己的 agent_proxy 仓库：
+
+```bash
+(
+  set -euo pipefail
+  cd /home/agent_proxy/sandbox_benchmark/agent_proxy
+  git pull --ff-only origin main
+  mkdir -p validation-logs
+  ap_log="validation-logs/spdiag-pr17-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+  set +e
+  nice -n 10 python3 -u -B scripts/check_spdiag_minimal.py --pr17 2>&1 | tee "$ap_log"
+  ap_rc=${PIPESTATUS[0]}
+  printf '\nPR17 test exit: %s\nFull log: %s\n' "$ap_rc" "$ap_log"
+  exit "$ap_rc"
+)
+```
+
+预期 Sleep1s 接近 1000 ms、Sleep5s 接近 5000 ms，二者均 PASS，
+Ticks=Good=1、Bad=Not=0、cleanup_confirmed=True、退出码为 0。
+本轮不启动 Agent Proxy 或 E2B。保留的 build/日志目录不自动删除；再次运行使用新目录。
+构建失败时终端输出失败命令的日志；回传第一条编译错误及 `Private PR build` 路径即可。
+运行失败时回传 SDK_MAPPING、新库摘要、两行 SAMPLE、CLI 统计和最终清理/退出状态。
+旧 RPM 的对照命令仍为不带参数的 `scripts/check_spdiag_minimal.py`，不会自动改为新库。
+
+### 六个 RPC 的完整采集验证（现有 RPM）
 
 ```bash
 (

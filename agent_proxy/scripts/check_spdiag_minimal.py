@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build/run only a two-sleep SDK probe against the already prepared RPM pair."""
+"""Run the unchanged 1s/5s SDK probe against the old RPM pair or isolated PR #17 build."""
+import argparse
 import csv
 import json
 import math
@@ -60,13 +61,21 @@ def compare(csv_path, samples):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pr17", action="store_true",
+                        help="Build pinned SpDiag PR #17 in a new private prefix; preserve the old RPM SDK")
+    args = parser.parse_args()
     if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
-        raise RuntimeError("requires Linux aarch64 and the already prepared RPM pair")
+        raise RuntimeError("requires Linux aarch64")
     os.umask(0o077)
-    prefix = ROOT / ".deps/spdiag"
-    manifest = json.loads((prefix / "agent-proxy-manifest.json").read_text(encoding="utf-8"))
-    if manifest["packages"] != PACKAGES:
-        raise ValueError("unexpected RPM manifest; use the existing prepare_spdiag.py workflow")
+    if args.pr17:
+        from prepare_spdiag_pr17 import prepare
+        prefix, manifest = prepare()
+    else:
+        prefix = ROOT / ".deps/spdiag"
+        manifest = json.loads((prefix / "agent-proxy-manifest.json").read_text(encoding="utf-8"))
+        if manifest["packages"] != PACKAGES:
+            raise ValueError("unexpected RPM manifest; use the existing prepare_spdiag.py workflow")
     for name, expected in manifest["files"].items():
         path = prefix / name
         if not path.resolve().is_relative_to(prefix.resolve()) or digest(path) != expected:
@@ -80,7 +89,7 @@ def main():
     shm_path = Path("/dev/shm") / name[1:]
     if shm_path.exists():
         raise FileExistsError(shm_path)
-    # This RPM's CLI reads ./spdiag.conf; --shm/--config are not supported.
+    # Both reviewed CLIs read ./spdiag.conf; do not use a default/shared session.
     (session / "spdiag.conf").write_text(
         f"[shm]\nname = {name}\n[general]\ndata_dir = {session / 'data'}\n"
         "history_size = 2\ndump_interval_ms = 1000\nlevel_gate = 1\nnum_cores = 1\n"
@@ -89,7 +98,8 @@ def main():
     env["LD_LIBRARY_PATH"] = str(prefix / "usr/lib64") + (
         ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
     report = {"passed": False, "cleanup_confirmed": False, "shm_name": name,
-              "session": str(session), "packages": PACKAGES}
+              "session": str(session), "packages": manifest.get("packages"),
+              "source": manifest.get("source"), "sdk_prefix": str(prefix)}
     cli = str(prefix / "usr/bin/spdiag")
     attempted_start = False
 
@@ -115,7 +125,10 @@ def main():
         return output
 
     print(f"Private SDK-only session: {session}", flush=True)
-    for package, sha in PACKAGES.items():
+    if args.pr17:
+        print("Mode: source-built PR #17; not a replacement RPM or Agent Proxy validation.", flush=True)
+        print("CMake options: " + json.dumps(manifest["source"]["cmake_options"], sort_keys=True), flush=True)
+    for package, sha in manifest.get("packages", {}).items():
         print(f"RPM SHA256 {package}: {sha}", flush=True)
     try:
         build = session / "build"
@@ -135,9 +148,10 @@ def main():
                     if line.startswith("SDK_MAPPING\t")]
         if (len(mappings) != 1 or not mappings[0].is_relative_to((prefix / "usr/lib64").resolve()) or
                 digest(mappings[0]) != manifest["files"]["usr/lib64/libspdiag.so.1"]):
-            raise ValueError("probe did not load the verified RPM shared library")
+            raise ValueError("probe did not load the verified shared library from the selected prefix")
         report["loaded_sdk"] = str(mappings[0])
         report["loaded_sdk_sha256"] = digest(mappings[0])
+        print(f"Loaded SDK SHA256: {report['loaded_sdk_sha256']}", flush=True)
         samples = read_samples(output)
         output = run("show", [cli, "show", "--csv", str(session / "csv")])
         print(output, flush=True)
